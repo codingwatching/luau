@@ -173,6 +173,70 @@ end
 assert(pcall(fuzzfail18) == true)
 assert(fuzzfail18() == 0)
 
+local function fuzzfail19()
+  local _ = 2
+  _ += _
+  _ = _,_ >= _,{_ >= _,_ >= _,_(),}
+
+  local _ = 2
+  do
+    _ = assert({n0=_,_,n0=_,}),{_={_[_()],},_,}
+  end
+end
+
+assert(pcall(fuzzfail19) == false)
+
+local function fuzzfail20()
+  assert(true)
+  assert(false,(_),true)
+  _ = nil
+end
+
+assert(pcall(fuzzfail20) == false)
+
+local function fuzzfail21(...)
+  local _ = assert,_
+  if _ then else return _ / _ end
+  _(_)
+  _(_,_)
+  assert(...,_)
+  _((not _),_)
+  _(true,_ / _)
+  _(_,_())
+  return _
+end
+
+assert(pcall(fuzzfail21) == false)
+
+local function fuzzfail22(...)
+  local _ = {false,},true,...,l0
+  while _ do
+  _ = true,{unpack(0,_),},l0
+  _.n126 = nil
+  _ = {not _,_=not _,n0=_,_,n0=not _,},_ < _
+  return _ > _
+  end
+  return `""`
+end
+
+assert(pcall(fuzzfail22) == false)
+
+local function fuzzfail23(...)
+  local _ = {false,},_,...,l0
+  while _ do
+  _ = true,{unpack(_),},l0
+  _ = {{[_]=nil,_=not _,_,true,_=nil,},not _,not _,_,bxor=- _,}
+  do end
+  break
+  end
+  do end
+  local _ = _,true
+  do end
+  local _ = _,true
+end
+
+assert(pcall(fuzzfail23) == false)
+
 local function arraySizeInv1()
   local t = {1, 2, nil, nil, nil, nil, nil, nil, nil, true}
 
@@ -406,5 +470,111 @@ local function bufferbounds(zero)
 end
 
 bufferbounds(0)
+
+function deadStoreChecks1()
+  local a = 1.0
+  local b = 0.0
+
+  local function update()
+    b += a
+    for i = 1, 100 do print(`{b} is {b}`) end
+  end
+
+  update()
+  a = 10
+  update()
+  a = 100
+  update()
+
+  return b
+end
+
+assert(deadStoreChecks1() == 111)
+
+local function extramath1(a)
+  return type(math.sign(a))
+end
+
+assert(extramath1(2) == "number")
+assert(extramath1("2") == "number")
+
+local function extramath2(a)
+  return type(math.modf(a))
+end
+
+assert(extramath2(2) == "number")
+assert(extramath2("2") == "number")
+
+local function extramath3(a)
+  local b, c = math.modf(a)
+  return type(c)
+end
+
+assert(extramath3(2) == "number")
+assert(extramath3("2") == "number")
+
+local function slotcachelimit1()
+  local tbl = {
+    f1 = function() return 1 end,
+    f2 = function() return 2 end,
+    f3 = function() return 3 end,
+    f4 = function() return 4 end,
+    f5 = function() return 5 end,
+    f6 = function() return 6 end,
+    f7 = function() return 7 end,
+    f8 = function() return 8 end,
+    f9 = function() return 9 end,
+    f10 = function() return 10 end,
+    f11 = function() return 11 end,
+    f12 = function() return 12 end,
+    f13 = function() return 13 end,
+    f14 = function() return 14 end,
+    f15 = function() return 15 end,
+    f16 = function() return 16 end,
+  }
+
+  local lookup = {
+    [tbl.f1] = 1,
+    [tbl.f2] = 2,
+    [tbl.f3] = 3,
+    [tbl.f4] = 4,
+    [tbl.f5] = 5,
+    [tbl.f6] = 6,
+    [tbl.f7] = 7,
+    [tbl.f8] = 8,
+    [tbl.f9] = 9,
+    [tbl.f10] = 10,
+    [tbl.f11] = 11,
+    [tbl.f12] = 12,
+    [tbl.f13] = 13,
+    [tbl.f14] = 14,
+    [tbl.f15] = 15,
+    [tbl.f16] = 16,
+  }
+
+  assert(is_native())
+
+  return lookup
+end
+
+slotcachelimit1()
+
+local function slotcachelimit2(foo, size)
+  local c1 = foo(vector.create(size.X, size.Y, size.Z))
+  local c2 = foo(vector.create(-size.X, size.Y, size.Z))
+  local c3 = foo(vector.create(-size.X, -size.Y, size.Z))
+  local c4 = foo(vector.create(-size.X, -size.Y, -size.Z))
+  local c5 = foo(vector.create(size.X, -size.Y, -size.Z))
+  local c6 = foo(vector.create(size.X, size.Y, -size.Z))
+  local c7 = foo(vector.create(size.X, -size.Y, size.Z))
+  local c8 = foo(vector.create(-size.X, size.Y, -size.Z))
+  local max = vector.create(math.max(c1.X, c2.X, c3.X, c4.X, c5.X, c6.X, c7.X, c8.X), math.max(c1.Y, c2.Y, c3.Y, c4.Y, c5.Y, c6.Y, c7.Y, c8.Y), math.max(c1.Z, c2.Z, c3.Z, c4.Z, c5.Z, c6.Z, c7.Z, c8.Z))
+  local min = vector.create(math.min(c1.X, c2.X, c3.X, c4.X, c5.X, c6.X, c7.X, c8.X), math.min(c1.Y, c2.Y, c3.Y, c4.Y, c5.Y, c6.Y, c7.Y, c8.Y), math.min(c1.Z, c2.Z, c3.Z, c4.Z, c5.Z, c6.Z, c7.Z, c8.Z))
+
+  assert(is_native())
+  return max - min
+end
+
+slotcachelimit2(function(a) return -a end, vector.create(1, 2, 3))
 
 return('OK')

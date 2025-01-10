@@ -10,10 +10,20 @@
 
 #include <algorithm>
 
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution)
+LUAU_FASTFLAG(LuauSolverV2)
 
 namespace Luau
 {
+
+void Instantiation::resetState(const TxnLog* log, TypeArena* arena, NotNull<BuiltinTypes> builtinTypes, TypeLevel level, Scope* scope)
+{
+    Substitution::resetState(log, arena);
+
+    this->builtinTypes = builtinTypes;
+
+    this->level = level;
+    this->scope = scope;
+}
 
 bool Instantiation::isDirty(TypeId ty)
 {
@@ -60,11 +70,11 @@ TypeId Instantiation::clean(TypeId ty)
 
     // Annoyingly, we have to do this even if there are no generics,
     // to replace any generic tables.
-    ReplaceGenerics replaceGenerics{log, arena, builtinTypes, level, scope, ftv->generics, ftv->genericPacks};
+    reusableReplaceGenerics.resetState(log, arena, builtinTypes, level, scope, ftv->generics, ftv->genericPacks);
 
     // TODO: What to do if this returns nullopt?
     // We don't have access to the error-reporting machinery
-    result = replaceGenerics.substitute(result).value_or(result);
+    result = reusableReplaceGenerics.substitute(result).value_or(result);
 
     asMutable(result)->documentationSymbol = ty->documentationSymbol;
     return result;
@@ -74,6 +84,27 @@ TypePackId Instantiation::clean(TypePackId tp)
 {
     LUAU_ASSERT(false);
     return tp;
+}
+
+void ReplaceGenerics::resetState(
+    const TxnLog* log,
+    TypeArena* arena,
+    NotNull<BuiltinTypes> builtinTypes,
+    TypeLevel level,
+    Scope* scope,
+    const std::vector<TypeId>& generics,
+    const std::vector<TypePackId>& genericPacks
+)
+{
+    Substitution::resetState(log, arena);
+
+    this->builtinTypes = builtinTypes;
+
+    this->level = level;
+    this->scope = scope;
+
+    this->generics = generics;
+    this->genericPacks = genericPacks;
 }
 
 bool ReplaceGenerics::ignoreChildren(TypeId ty)
@@ -126,7 +157,7 @@ TypeId ReplaceGenerics::clean(TypeId ty)
         clone.definitionLocation = ttv->definitionLocation;
         return addType(std::move(clone));
     }
-    else if (FFlag::DebugLuauDeferredConstraintResolution)
+    else if (FFlag::LuauSolverV2)
     {
         TypeId res = freshType(NotNull{arena}, builtinTypes, scope);
         getMutable<FreeType>(res)->level = level;
@@ -145,7 +176,12 @@ TypePackId ReplaceGenerics::clean(TypePackId tp)
 }
 
 std::optional<TypeId> instantiate(
-    NotNull<BuiltinTypes> builtinTypes, NotNull<TypeArena> arena, NotNull<TypeCheckLimits> limits, NotNull<Scope> scope, TypeId ty)
+    NotNull<BuiltinTypes> builtinTypes,
+    NotNull<TypeArena> arena,
+    NotNull<TypeCheckLimits> limits,
+    NotNull<Scope> scope,
+    TypeId ty
+)
 {
     ty = follow(ty);
 

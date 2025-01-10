@@ -5,7 +5,6 @@
 
 #include <string>
 #include <vector>
-#include <stdint.h>
 
 #include <stdint.h>
 
@@ -16,7 +15,7 @@ struct HotComment;
 
 struct LintWarning
 {
-    // Make sure any new lint codes are documented here: https://luau-lang.org/lint
+    // Make sure any new lint codes are documented here: https://luau.org/lint
     // Note that in Studio, the active set of lint warnings is determined by FStringStudioLuauLints
     enum Code
     {
@@ -50,6 +49,7 @@ struct LintWarning
         Code_CommentDirective = 26,
         Code_IntegerParsing = 27,
         Code_ComparisonPrecedence = 28,
+        Code_RedundantNativeAttribute = 29,
 
         Code__Count
     };
@@ -116,6 +116,7 @@ static const char* kWarningNames[] = {
     "CommentDirective",
     "IntegerParsing",
     "ComparisonPrecedence",
+    "RedundantNativeAttribute",
 };
 // clang-format on
 

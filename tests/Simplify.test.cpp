@@ -8,7 +8,8 @@
 
 using namespace Luau;
 
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution)
+LUAU_FASTFLAG(LuauSolverV2)
+LUAU_DYNAMIC_FASTINT(LuauSimplificationComplexityLimit)
 
 namespace
 {
@@ -61,7 +62,7 @@ struct SimplifyFixture : Fixture
     TypeId anotherChildClassTy = nullptr;
     TypeId unrelatedClassTy = nullptr;
 
-    ScopedFastFlag sff{FFlag::DebugLuauDeferredConstraintResolution, true};
+    ScopedFastFlag sff{FFlag::LuauSolverV2, true};
 
     SimplifyFixture()
     {
@@ -130,16 +131,17 @@ TEST_CASE_FIXTURE(SimplifyFixture, "overload_negation_refinement_is_never")
 
 TEST_CASE_FIXTURE(SimplifyFixture, "unknown_and_other_tops_and_bottom_types")
 {
+
     CHECK(unknownTy == intersect(unknownTy, unknownTy));
 
-    CHECK(unknownTy == intersect(unknownTy, anyTy));
-    CHECK(unknownTy == intersect(anyTy, unknownTy));
+    CHECK("any" == intersectStr(unknownTy, anyTy));
+    CHECK("any" == intersectStr(anyTy, unknownTy));
 
     CHECK(neverTy == intersect(unknownTy, neverTy));
     CHECK(neverTy == intersect(neverTy, unknownTy));
 
-    CHECK(neverTy == intersect(unknownTy, errorTy));
-    CHECK(neverTy == intersect(errorTy, unknownTy));
+    CHECK(errorTy == intersect(unknownTy, errorTy));
+    CHECK(errorTy == intersect(errorTy, unknownTy));
 }
 
 TEST_CASE_FIXTURE(SimplifyFixture, "nil")
@@ -179,17 +181,45 @@ TEST_CASE_FIXTURE(SimplifyFixture, "boolean_and_truthy_and_falsy")
 
 TEST_CASE_FIXTURE(SimplifyFixture, "any_and_indeterminate_types")
 {
-    CHECK("'a" == intersectStr(anyTy, freeTy));
-    CHECK("'a" == intersectStr(freeTy, anyTy));
+    CHECK("'a | *error-type*" == intersectStr(anyTy, freeTy));
+    CHECK("'a | *error-type*" == intersectStr(freeTy, anyTy));
 
-    CHECK("b" == intersectStr(anyTy, genericTy));
-    CHECK("b" == intersectStr(genericTy, anyTy));
+    CHECK("*error-type* | b" == intersectStr(anyTy, genericTy));
+    CHECK("*error-type* | b" == intersectStr(genericTy, anyTy));
 
-    CHECK(blockedTy == intersect(anyTy, blockedTy));
-    CHECK(blockedTy == intersect(blockedTy, anyTy));
+    auto anyRhsBlocked = get<UnionType>(intersect(anyTy, blockedTy));
+    auto anyLhsBlocked = get<UnionType>(intersect(blockedTy, anyTy));
 
-    CHECK(pendingTy == intersect(anyTy, pendingTy));
-    CHECK(pendingTy == intersect(pendingTy, anyTy));
+    REQUIRE(anyRhsBlocked);
+    REQUIRE(anyRhsBlocked->options.size() == 2);
+    CHECK(blockedTy == anyRhsBlocked->options[0]);
+    CHECK(errorTy == anyRhsBlocked->options[1]);
+
+    REQUIRE(anyLhsBlocked);
+    REQUIRE(anyLhsBlocked->options.size() == 2);
+    CHECK(blockedTy == anyLhsBlocked->options[0]);
+    CHECK(errorTy == anyLhsBlocked->options[1]);
+
+    auto anyRhsPending = get<UnionType>(intersect(anyTy, pendingTy));
+    auto anyLhsPending = get<UnionType>(intersect(pendingTy, anyTy));
+
+    REQUIRE(anyRhsPending);
+    REQUIRE(anyRhsPending->options.size() == 2);
+    CHECK(pendingTy == anyRhsPending->options[0]);
+    CHECK(errorTy == anyRhsPending->options[1]);
+
+    REQUIRE(anyLhsPending);
+    REQUIRE(anyLhsPending->options.size() == 2);
+    CHECK(pendingTy == anyLhsPending->options[0]);
+    CHECK(errorTy == anyLhsPending->options[1]);
+}
+
+TEST_CASE_FIXTURE(SimplifyFixture, "union_where_lhs_elements_are_a_subset_of_the_rhs")
+{
+    TypeId lhs = union_(numberTy, stringTy);
+    TypeId rhs = union_(stringTy, numberTy);
+
+    CHECK("number | string" == toString(union_(lhs, rhs)));
 }
 
 TEST_CASE_FIXTURE(SimplifyFixture, "unknown_and_indeterminate_types")
@@ -197,22 +227,14 @@ TEST_CASE_FIXTURE(SimplifyFixture, "unknown_and_indeterminate_types")
     CHECK(freeTy == intersect(unknownTy, freeTy));
     CHECK(freeTy == intersect(freeTy, unknownTy));
 
-    TypeId t = nullptr;
+    CHECK(genericTy == intersect(unknownTy, genericTy));
+    CHECK(genericTy == intersect(genericTy, unknownTy));
 
-    t = intersect(unknownTy, genericTy);
-    CHECK_MESSAGE(isIntersection(t), "Should be an intersection but got " << t);
-    t = intersect(genericTy, unknownTy);
-    CHECK_MESSAGE(isIntersection(t), "Should be an intersection but got " << t);
+    CHECK(blockedTy == intersect(unknownTy, blockedTy));
+    CHECK(blockedTy == intersect(unknownTy, blockedTy));
 
-    t = intersect(unknownTy, blockedTy);
-    CHECK_MESSAGE(isIntersection(t), "Should be an intersection but got " << t);
-    t = intersect(blockedTy, unknownTy);
-    CHECK_MESSAGE(isIntersection(t), "Should be an intersection but got " << t);
-
-    t = intersect(unknownTy, pendingTy);
-    CHECK_MESSAGE(isIntersection(t), "Should be an intersection but got " << t);
-    t = intersect(pendingTy, unknownTy);
-    CHECK_MESSAGE(isIntersection(t), "Should be an intersection but got " << t);
+    CHECK(pendingTy == intersect(unknownTy, pendingTy));
+    CHECK(pendingTy == intersect(unknownTy, pendingTy));
 }
 
 TEST_CASE_FIXTURE(SimplifyFixture, "unknown_and_concrete")
@@ -274,8 +296,8 @@ TEST_CASE_FIXTURE(SimplifyFixture, "primitives")
     CHECK(neverTy == intersect(neverTy, tableTy));
     CHECK(neverTy == intersect(tableTy, neverTy));
 
-    CHECK(numberTy == intersect(anyTy, numberTy));
-    CHECK(numberTy == intersect(numberTy, anyTy));
+    CHECK("*error-type* | number" == intersectStr(anyTy, numberTy));
+    CHECK("*error-type* | number" == intersectStr(numberTy, anyTy));
 
     CHECK(neverTy == intersect(stringTy, nilTy));
     CHECK(neverTy == intersect(nilTy, stringTy));
@@ -363,9 +385,36 @@ TEST_CASE_FIXTURE(SimplifyFixture, "tables")
     CHECK(t2 == intersect(t2, t1));
 
     TypeId t3 = mkTable({});
-    // {tag : string} intersect {{}}
+    // {tag : string} intersect {}
     CHECK(t1 == intersect(t1, t3));
     CHECK(t1 == intersect(t3, t1));
+}
+
+TEST_CASE_FIXTURE(SimplifyFixture, "combine_disjoint_sealed_tables")
+{
+    TypeId t1 = mkTable({{"prop", stringTy}});
+    TypeId t2 = mkTable({{"second_prop", numberTy}});
+
+    CHECK("{ prop: string, second_prop: number }" == toString(intersect(t1, t2)));
+}
+
+TEST_CASE_FIXTURE(SimplifyFixture, "non_disjoint_tables_do_not_simplify")
+{
+    TypeId t1 = mkTable({{"prop", stringTy}});
+    TypeId t2 = mkTable({{"prop", unknownTy}, {"second_prop", numberTy}});
+
+    CHECK("{ prop: string } & { prop: unknown, second_prop: number }" == toString(intersect(t1, t2)));
+}
+
+// Simplification has an extra code path especially for intersections with
+// single-property tables, so it's worthwhile to separately test the case where
+// both tables have multiple properties.
+TEST_CASE_FIXTURE(SimplifyFixture, "non_disjoint_tables_do_not_simplify_2")
+{
+    TypeId t1 = mkTable({{"prop", stringTy}, {"third_prop", numberTy}});
+    TypeId t2 = mkTable({{"prop", unknownTy}, {"second_prop", numberTy}});
+
+    CHECK("{ prop: string, third_prop: number } & { prop: unknown, second_prop: number }" == toString(intersect(t1, t2)));
 }
 
 TEST_CASE_FIXTURE(SimplifyFixture, "tables_and_top_table")
@@ -402,16 +451,18 @@ TEST_CASE_FIXTURE(SimplifyFixture, "table_with_a_tag")
 TEST_CASE_FIXTURE(SimplifyFixture, "nested_table_tag_test")
 {
     TypeId t1 = mkTable({
-        {"subtable", mkTable({
-                         {"tag", helloTy},
-                         {"subprop", numberTy},
-                     })},
+        {"subtable",
+         mkTable({
+             {"tag", helloTy},
+             {"subprop", numberTy},
+         })},
         {"prop", stringTy},
     });
     TypeId t2 = mkTable({
-        {"subtable", mkTable({
-                         {"tag", helloTy},
-                     })},
+        {"subtable",
+         mkTable({
+             {"tag", helloTy},
+         })},
     });
 
     CHECK(t1 == intersect(t1, t2));
@@ -430,6 +481,7 @@ TEST_CASE_FIXTURE(SimplifyFixture, "union")
 
 TEST_CASE_FIXTURE(SimplifyFixture, "two_unions")
 {
+    ScopedFastInt sfi{DFInt::LuauSimplificationComplexityLimit, 10};
     TypeId t1 = arena->addType(UnionType{{numberTy, booleanTy, stringTy, nilTy, tableTy}});
 
     CHECK("false?" == intersectStr(t1, falsyTy));
@@ -504,7 +556,15 @@ TEST_CASE_FIXTURE(SimplifyFixture, "some_tables_are_really_never")
 
     CHECK(neverTy == intersect(t1, numberTy));
     CHECK(neverTy == intersect(numberTy, t1));
-    CHECK(neverTy == intersect(t1, t1));
+    CHECK(t1 == intersect(t1, t1));
+
+    TypeId notUnknownTy = mkNegation(unknownTy);
+
+    TypeId t2 = mkTable({{"someKey", notUnknownTy}});
+
+    CHECK(neverTy == intersect(t2, numberTy));
+    CHECK(neverTy == intersect(numberTy, t2));
+    CHECK(neverTy == intersect(t2, t2));
 }
 
 TEST_CASE_FIXTURE(SimplifyFixture, "simplify_stops_at_cycles")
@@ -520,20 +580,43 @@ TEST_CASE_FIXTURE(SimplifyFixture, "simplify_stops_at_cycles")
     tt->props["cyclic"] = Property{t2};
     t2t->props["cyclic"] = Property{t};
 
-    CHECK(t == intersect(t, anyTy));
-    CHECK(t == intersect(anyTy, t));
+    CHECK(t == intersect(t, unknownTy));
+    CHECK(t == intersect(unknownTy, t));
 
-    CHECK(t2 == intersect(t2, anyTy));
-    CHECK(t2 == intersect(anyTy, t2));
+    CHECK(t2 == intersect(t2, unknownTy));
+    CHECK(t2 == intersect(unknownTy, t2));
+
+    CHECK("*error-type* | t1 where t1 = { cyclic: { cyclic: t1 } }" == intersectStr(t, anyTy));
+    CHECK("*error-type* | t1 where t1 = { cyclic: { cyclic: t1 } }" == intersectStr(anyTy, t));
+
+    CHECK("*error-type* | t1 where t1 = { cyclic: { cyclic: t1 } }" == intersectStr(t2, anyTy));
+    CHECK("*error-type* | t1 where t1 = { cyclic: { cyclic: t1 } }" == intersectStr(anyTy, t2));
 }
 
 TEST_CASE_FIXTURE(SimplifyFixture, "free_type_bound_by_any_with_any")
 {
-    CHECK(freeTy == intersect(freeTy, anyTy));
-    CHECK(freeTy == intersect(anyTy, freeTy));
+    CHECK("'a | *error-type*" == intersectStr(freeTy, anyTy));
+    CHECK("'a | *error-type*" == intersectStr(anyTy, freeTy));
 
-    CHECK(freeTy == intersect(freeTy, anyTy));
-    CHECK(freeTy == intersect(anyTy, freeTy));
+    CHECK("'a | *error-type*" == intersectStr(freeTy, anyTy));
+    CHECK("'a | *error-type*" == intersectStr(anyTy, freeTy));
+}
+
+TEST_CASE_FIXTURE(SimplifyFixture, "bound_intersected_by_itself_should_be_itself")
+{
+    TypeId blocked = arena->addType(BlockedType{});
+    CHECK(toString(blocked) == intersectStr(blocked, blocked));
+}
+
+TEST_CASE_FIXTURE(SimplifyFixture, "cyclic_never_union_and_string")
+{
+    // t1 where t1 = never | t1
+    TypeId leftType = arena->addType(UnionType{{builtinTypes->neverType, builtinTypes->neverType}});
+    UnionType* leftUnion = getMutable<UnionType>(leftType);
+    REQUIRE(leftUnion);
+    leftUnion->options[0] = leftType;
+
+    CHECK(builtinTypes->stringType == union_(leftType, builtinTypes->stringType));
 }
 
 TEST_SUITE_END();

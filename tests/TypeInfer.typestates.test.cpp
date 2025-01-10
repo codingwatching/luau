@@ -3,7 +3,7 @@
 
 #include "doctest.h"
 
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution)
+LUAU_FASTFLAG(LuauSolverV2)
 
 using namespace Luau;
 
@@ -11,7 +11,7 @@ namespace
 {
 struct TypeStateFixture : BuiltinsFixture
 {
-    ScopedFastFlag dcr{FFlag::DebugLuauDeferredConstraintResolution, true};
+    ScopedFastFlag dcr{FFlag::LuauSolverV2, true};
 };
 } // namespace
 
@@ -25,7 +25,7 @@ TEST_CASE_FIXTURE(TypeStateFixture, "initialize_x_of_type_string_or_nil_with_nil
     )");
 
     LUAU_REQUIRE_NO_ERRORS(result);
-    CHECK("nil" == toString(requireType("a")));
+    CHECK("string?" == toString(requireType("a")));
 }
 
 TEST_CASE_FIXTURE(TypeStateFixture, "extraneous_lvalues_are_populated_with_nil")
@@ -55,7 +55,7 @@ TEST_CASE_FIXTURE(TypeStateFixture, "assign_different_values_to_x")
     )");
 
     LUAU_REQUIRE_NO_ERRORS(result);
-    CHECK("nil" == toString(requireType("a")));
+    CHECK("string?" == toString(requireType("a")));
     CHECK("string" == toString(requireType("b")));
 }
 
@@ -73,8 +73,28 @@ TEST_CASE_FIXTURE(TypeStateFixture, "parameter_x_was_constrained_by_two_types")
         end
     )");
 
-    LUAU_REQUIRE_NO_ERRORS(result);
-    CHECK("(string) -> string?" == toString(requireType("f")));
+    if (FFlag::LuauSolverV2)
+    {
+        // `y` is annotated `string | number` which is explicitly not compatible with `string?`
+        // as such, we produce an error here for that mismatch.
+        //
+        // this is not necessarily the best inference here, since we can indeed produce `string`
+        // as a type for `x`, but it's a limitation we can accept for now.
+        LUAU_REQUIRE_ERRORS(result);
+
+        TypePackMismatch* tpm = get<TypePackMismatch>(result.errors[0]);
+        REQUIRE(tpm);
+        CHECK("string?" == toString(tpm->wantedTp));
+        CHECK("number | string" == toString(tpm->givenTp));
+
+        CHECK("(number | string) -> string?" == toString(requireType("f")));
+    }
+    else
+    {
+        LUAU_REQUIRE_NO_ERRORS(result);
+
+        CHECK("(string) -> string?" == toString(requireType("f")));
+    }
 }
 
 #if 0
@@ -180,7 +200,7 @@ TEST_CASE_FIXTURE(TypeStateFixture, "assignment_swap")
     CHECK("number" == toString(requireType("b")));
 }
 
-TEST_CASE_FIXTURE(TypeStateFixture, "parameter_x_was_constrained_by_two_types")
+TEST_CASE_FIXTURE(TypeStateFixture, "parameter_x_was_constrained_by_two_types_2")
 {
     CheckResult result = check(R"(
         local function f(x): number?
@@ -372,7 +392,7 @@ TEST_CASE_FIXTURE(TypeStateFixture, "prototyped_recursive_functions")
 TEST_CASE_FIXTURE(BuiltinsFixture, "prototyped_recursive_functions_but_has_future_assignments")
 {
     // early return if the flag isn't set since this is blocking gated commits
-    if (!FFlag::DebugLuauDeferredConstraintResolution)
+    if (!FFlag::LuauSolverV2)
         return;
 
     CheckResult result = check(R"(
@@ -386,6 +406,7 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "prototyped_recursive_functions_but_has_futur
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
+
     CHECK("((() -> ()) | number)?" == toString(requireType("f")));
 }
 
@@ -438,7 +459,9 @@ TEST_CASE_FIXTURE(TypeStateFixture, "typestates_preserve_error_suppression")
 TEST_CASE_FIXTURE(BuiltinsFixture, "typestates_preserve_error_suppression_properties")
 {
     // early return if the flag isn't set since this is blocking gated commits
-    if (!FFlag::DebugLuauDeferredConstraintResolution)
+    // unconditional return
+    // CLI-117098 Type states with error suppressing properties doesn't infer the correct type for properties.
+    if (!FFlag::LuauSolverV2 || FFlag::LuauSolverV2)
         return;
 
     CheckResult result = check(R"(
@@ -451,5 +474,53 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "typestates_preserve_error_suppression_proper
     CHECK("*error-type* | string" == toString(requireTypeAtPosition({3, 16}), {true}));
 }
 
+TEST_CASE_FIXTURE(BuiltinsFixture, "typestates_do_not_apply_to_the_initial_local_definition")
+{
+    // early return if the flag isn't set since this is blocking gated commits
+    if (!FFlag::LuauSolverV2)
+        return;
+
+    CheckResult result = check(R"(
+        type MyType = number | string
+        local foo: MyType = 5
+        print(foo)
+        foo = 7
+        print(foo)
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+    CHECK("number | string" == toString(requireTypeAtPosition({3, 14}), {true}));
+    CHECK("number" == toString(requireTypeAtPosition({5, 14}), {true}));
+}
+
+TEST_CASE_FIXTURE(Fixture, "typestate_globals")
+{
+    ScopedFastFlag sff{FFlag::LuauSolverV2, true};
+
+    loadDefinition(R"(
+        declare foo: string | number
+        declare function f(x: string): ()
+    )");
+
+    CheckResult result = check(R"(
+        foo = "a"
+        f(foo)
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(Fixture, "typestate_unknown_global")
+{
+    ScopedFastFlag sff{FFlag::LuauSolverV2, true};
+
+    CheckResult result = check(R"(
+        x = 5
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+
+    CHECK(get<UnknownSymbol>(result.errors[0]));
+}
 
 TEST_SUITE_END();

@@ -27,6 +27,10 @@ const size_t kPageSize = sysconf(_SC_PAGESIZE);
 #endif
 #endif
 
+#ifdef __APPLE__
+extern "C" void sys_icache_invalidate(void* start, size_t len);
+#endif
+
 static size_t alignToPageSize(size_t size)
 {
     return (size + kPageSize - 1) & ~(kPageSize - 1);
@@ -98,7 +102,11 @@ static void makePagesExecutable(uint8_t* mem, size_t size)
 
 static void flushInstructionCache(uint8_t* mem, size_t size)
 {
+#ifdef __APPLE__
+    sys_icache_invalidate(mem, size);
+#else
     __builtin___clear_cache((char*)mem, (char*)mem + size);
+#endif
 }
 #endif
 
@@ -135,7 +143,14 @@ CodeAllocator::~CodeAllocator()
 }
 
 bool CodeAllocator::allocate(
-    const uint8_t* data, size_t dataSize, const uint8_t* code, size_t codeSize, uint8_t*& result, size_t& resultSize, uint8_t*& resultCodeStart)
+    const uint8_t* data,
+    size_t dataSize,
+    const uint8_t* code,
+    size_t codeSize,
+    uint8_t*& result,
+    size_t& resultSize,
+    uint8_t*& resultCodeStart
+)
 {
     // 'Round up' to preserve code alignment
     size_t alignedDataSize = (dataSize + (kCodeAlignment - 1)) & ~(kCodeAlignment - 1);

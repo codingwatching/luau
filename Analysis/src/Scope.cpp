@@ -2,7 +2,7 @@
 
 #include "Luau/Scope.h"
 
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
+LUAU_FASTFLAG(LuauSolverV2);
 
 namespace Luau
 {
@@ -44,8 +44,9 @@ std::optional<std::pair<TypeId, Scope*>> Scope::lookupEx(DefId def)
 
     while (true)
     {
-        TypeId* it = s->lvalueTypes.find(def);
-        if (it)
+        if (TypeId* it = s->lvalueTypes.find(def))
+            return std::pair{*it, s};
+        else if (TypeId* it = s->rvalueRefinements.find(def))
             return std::pair{*it, s};
 
         if (s->parent)
@@ -183,7 +184,7 @@ std::optional<Binding> Scope::linearSearchForBinding(const std::string& name, bo
 // Updates the `this` scope with the assignments from the `childScope` including ones that doesn't exist in `this`.
 void Scope::inheritAssignments(const ScopePtr& childScope)
 {
-    if (!FFlag::DebugLuauDeferredConstraintResolution)
+    if (!FFlag::LuauSolverV2)
         return;
 
     for (const auto& [k, a] : childScope->lvalueTypes)
@@ -193,7 +194,7 @@ void Scope::inheritAssignments(const ScopePtr& childScope)
 // Updates the `this` scope with the refinements from the `childScope` excluding ones that doesn't exist in `this`.
 void Scope::inheritRefinements(const ScopePtr& childScope)
 {
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2)
     {
         for (const auto& [k, a] : childScope->rvalueRefinements)
         {
@@ -208,6 +209,16 @@ void Scope::inheritRefinements(const ScopePtr& childScope)
         if (lookup(symbol))
             refinements[k] = a;
     }
+}
+
+bool Scope::shouldWarnGlobal(std::string name) const
+{
+    for (const Scope* current = this; current; current = current->parent.get())
+    {
+        if (current->globalsToWarn.contains(name))
+            return true;
+    }
+    return false;
 }
 
 bool subsumesStrict(Scope* left, Scope* right)

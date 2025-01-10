@@ -1,6 +1,7 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
+#include "Luau/Allocator.h"
 #include "Luau/Ast.h"
 #include "Luau/Location.h"
 #include "Luau/DenseHash.h"
@@ -10,40 +11,6 @@
 
 namespace Luau
 {
-
-class Allocator
-{
-public:
-    Allocator();
-    Allocator(Allocator&&);
-
-    Allocator& operator=(Allocator&&) = delete;
-
-    ~Allocator();
-
-    void* allocate(size_t size);
-
-    template<typename T, typename... Args>
-    T* alloc(Args&&... args)
-    {
-        static_assert(std::is_trivially_destructible<T>::value, "Objects allocated with this allocator will never have their destructors run!");
-
-        T* t = static_cast<T*>(allocate(sizeof(T)));
-        new (t) T(std::forward<Args>(args)...);
-        return t;
-    }
-
-private:
-    struct Page
-    {
-        Page* next;
-
-        char data[8192];
-    };
-
-    Page* root;
-    size_t offset;
-};
 
 struct Lexeme
 {
@@ -87,6 +54,8 @@ struct Lexeme
         Comment,
         BlockComment,
 
+        Attribute,
+
         BrokenString,
         BrokenComment,
         BrokenUnicode,
@@ -115,14 +84,20 @@ struct Lexeme
         ReservedTrue,
         ReservedUntil,
         ReservedWhile,
-        ReservedChecked,
         Reserved_END
     };
 
     Type type;
     Location location;
+
+    // Field declared here, before the union, to ensure that Lexeme size is 32 bytes.
+private:
+    // length is used to extract a slice from the input buffer.
+    // This field is only valid for certain lexeme types which don't duplicate portions of input
+    // but instead store a pointer to a location in the input buffer and the length of lexeme.
     unsigned int length;
 
+public:
     union
     {
         const char* data;       // String, Number, Comment
@@ -135,8 +110,12 @@ struct Lexeme
     Lexeme(const Location& location, Type type, const char* data, size_t size);
     Lexeme(const Location& location, Type type, const char* name);
 
+    unsigned int getLength() const;
+
     std::string toString() const;
 };
+
+static_assert(sizeof(Lexeme) <= 32, "Size of `Lexeme` struct should be up to 32 bytes.");
 
 class AstNameTable
 {
@@ -174,7 +153,7 @@ private:
 class Lexer
 {
 public:
-    Lexer(const char* buffer, std::size_t bufferSize, AstNameTable& names);
+    Lexer(const char* buffer, std::size_t bufferSize, AstNameTable& names, Position startPosition = {0, 0});
 
     void setSkipComments(bool skip);
     void setReadNames(bool read);

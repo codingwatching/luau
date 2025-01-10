@@ -4,7 +4,8 @@
 #include "Luau/Lexer.h"
 #include "Luau/StringUtils.h"
 #include <algorithm>
-#include <unordered_map>
+#include <memory>
+#include <string>
 
 namespace Luau
 {
@@ -14,6 +15,54 @@ using Error = std::optional<std::string>;
 Config::Config()
 {
     enabledLint.setDefaults();
+}
+
+Config::Config(const Config& other)
+    : mode(other.mode)
+    , parseOptions(other.parseOptions)
+    , enabledLint(other.enabledLint)
+    , fatalLint(other.fatalLint)
+    , lintErrors(other.lintErrors)
+    , typeErrors(other.typeErrors)
+    , globals(other.globals)
+{
+    for (const auto& [_, aliasInfo] : other.aliases)
+    {
+        setAlias(aliasInfo.originalCase, aliasInfo.value, std::string(aliasInfo.configLocation));
+    }
+}
+
+Config& Config::operator=(const Config& other)
+{
+    if (this != &other)
+    {
+        Config copy(other);
+        std::swap(*this, copy);
+    }
+    return *this;
+}
+
+void Config::setAlias(std::string alias, std::string value, const std::string& configLocation)
+{
+    std::string lowercasedAlias = alias;
+    std::transform(
+        lowercasedAlias.begin(),
+        lowercasedAlias.end(),
+        lowercasedAlias.begin(),
+        [](unsigned char c)
+        {
+            return ('A' <= c && c <= 'Z') ? (c + ('a' - 'A')) : c;
+        }
+    );
+
+    AliasInfo& info = aliases[lowercasedAlias];
+    info.value = std::move(value);
+    info.originalCase = std::move(alias);
+
+    if (!configLocationCache.contains(configLocation))
+        configLocationCache[configLocation] = std::make_unique<std::string>(configLocation);
+
+    info.configLocation = *configLocationCache[configLocation];
 }
 
 static Error parseBoolean(bool& result, const std::string& value)
@@ -45,7 +94,12 @@ Error parseModeString(Mode& mode, const std::string& modeString, bool compat)
 }
 
 static Error parseLintRuleStringForCode(
-    LintOptions& enabledLints, LintOptions& fatalLints, LintWarning::Code code, const std::string& value, bool compat)
+    LintOptions& enabledLints,
+    LintOptions& fatalLints,
+    LintWarning::Code code,
+    const std::string& value,
+    bool compat
+)
 {
     if (value == "true")
     {
@@ -131,16 +185,21 @@ bool isValidAlias(const std::string& alias)
     return true;
 }
 
-Error parseAlias(std::unordered_map<std::string, std::string>& aliases, std::string aliasKey, const std::string& aliasValue)
+static Error parseAlias(
+    Config& config,
+    const std::string& aliasKey,
+    const std::string& aliasValue,
+    const std::optional<ConfigOptions::AliasOptions>& aliasOptions
+)
 {
     if (!isValidAlias(aliasKey))
         return Error{"Invalid alias " + aliasKey};
 
-    std::transform(aliasKey.begin(), aliasKey.end(), aliasKey.begin(), [](unsigned char c) {
-        return ('A' <= c && c <= 'Z') ? (c + ('a' - 'A')) : c;
-    });
-    if (!aliases.count(aliasKey))
-        aliases[std::move(aliasKey)] = aliasValue;
+    if (!aliasOptions)
+        return Error("Cannot parse aliases without alias options");
+
+    if (aliasOptions->overwriteAliases || !config.aliases.contains(aliasKey))
+        config.setAlias(aliasKey, aliasValue, aliasOptions->configLocation);
 
     return std::nullopt;
 }
@@ -195,7 +254,7 @@ static Error parseJson(const std::string& contents, Action action)
             }
             else if (lexer.current().type == Lexeme::QuotedString)
             {
-                std::string value(lexer.current().data, lexer.current().length);
+                std::string value(lexer.current().data, lexer.current().getLength());
                 next(lexer);
 
                 if (Error err = action(keys, value))
@@ -232,7 +291,7 @@ static Error parseJson(const std::string& contents, Action action)
             }
             else if (lexer.current().type == Lexeme::QuotedString)
             {
-                std::string key(lexer.current().data, lexer.current().length);
+                std::string key(lexer.current().data, lexer.current().getLength());
                 next(lexer);
 
                 keys.push_back(key);
@@ -250,7 +309,7 @@ static Error parseJson(const std::string& contents, Action action)
                          lexer.current().type == Lexeme::ReservedFalse)
                 {
                     std::string value = lexer.current().type == Lexeme::QuotedString
-                                            ? std::string(lexer.current().data, lexer.current().length)
+                                            ? std::string(lexer.current().data, lexer.current().getLength())
                                             : (lexer.current().type == Lexeme::ReservedTrue ? "true" : "false");
                     next(lexer);
 
@@ -275,37 +334,36 @@ static Error parseJson(const std::string& contents, Action action)
     return {};
 }
 
-Error parseConfig(const std::string& contents, Config& config, bool compat)
+Error parseConfig(const std::string& contents, Config& config, const ConfigOptions& options)
 {
-    return parseJson(contents, [&](const std::vector<std::string>& keys, const std::string& value) -> Error {
-        if (keys.size() == 1 && keys[0] == "languageMode")
-            return parseModeString(config.mode, value, compat);
-        else if (keys.size() == 2 && keys[0] == "lint")
-            return parseLintRuleString(config.enabledLint, config.fatalLint, keys[1], value, compat);
-        else if (keys.size() == 1 && keys[0] == "lintErrors")
-            return parseBoolean(config.lintErrors, value);
-        else if (keys.size() == 1 && keys[0] == "typeErrors")
-            return parseBoolean(config.typeErrors, value);
-        else if (keys.size() == 1 && keys[0] == "globals")
+    return parseJson(
+        contents,
+        [&](const std::vector<std::string>& keys, const std::string& value) -> Error
         {
-            config.globals.push_back(value);
-            return std::nullopt;
+            if (keys.size() == 1 && keys[0] == "languageMode")
+                return parseModeString(config.mode, value, options.compat);
+            else if (keys.size() == 2 && keys[0] == "lint")
+                return parseLintRuleString(config.enabledLint, config.fatalLint, keys[1], value, options.compat);
+            else if (keys.size() == 1 && keys[0] == "lintErrors")
+                return parseBoolean(config.lintErrors, value);
+            else if (keys.size() == 1 && keys[0] == "typeErrors")
+                return parseBoolean(config.typeErrors, value);
+            else if (keys.size() == 1 && keys[0] == "globals")
+            {
+                config.globals.push_back(value);
+                return std::nullopt;
+            }
+            else if (keys.size() == 2 && keys[0] == "aliases")
+                return parseAlias(config, keys[1], value, options.aliasOptions);
+            else if (options.compat && keys.size() == 2 && keys[0] == "language" && keys[1] == "mode")
+                return parseModeString(config.mode, value, options.compat);
+            else
+            {
+                std::vector<std::string_view> keysv(keys.begin(), keys.end());
+                return "Unknown key " + join(keysv, "/");
+            }
         }
-        else if (keys.size() == 1 && keys[0] == "paths")
-        {
-            config.paths.push_back(value);
-            return std::nullopt;
-        }
-        else if (keys.size() == 2 && keys[0] == "aliases")
-            return parseAlias(config.aliases, keys[1], value);
-        else if (compat && keys.size() == 2 && keys[0] == "language" && keys[1] == "mode")
-            return parseModeString(config.mode, value, compat);
-        else
-        {
-            std::vector<std::string_view> keysv(keys.begin(), keys.end());
-            return "Unknown key " + join(keysv, "/");
-        }
-    });
+    );
 }
 
 const Config& NullConfigResolver::getConfig(const ModuleName& name) const

@@ -694,4 +694,11 @@ TEST_CASE_FIXTURE(Fixture, "transpile_string_literal_escape")
     CHECK_EQ(code, transpile(code, {}, true).code);
 }
 
+TEST_CASE_FIXTURE(Fixture, "transpile_type_functions")
+{
+    std::string code = R"( type function foo(arg1, arg2) if arg1 == arg2 then return arg1 end return arg2 end )";
+
+    CHECK_EQ(code, transpile(code, {}, true).code);
+}
+
 TEST_SUITE_END();

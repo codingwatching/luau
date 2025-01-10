@@ -344,8 +344,9 @@ static void dumptable(FILE* f, Table* h)
 
 static void dumpclosure(FILE* f, Closure* cl)
 {
-    fprintf(f, "{\"type\":\"function\",\"cat\":%d,\"size\":%d", cl->memcat,
-        cl->isC ? int(sizeCclosure(cl->nupvalues)) : int(sizeLclosure(cl->nupvalues)));
+    fprintf(
+        f, "{\"type\":\"function\",\"cat\":%d,\"size\":%d", cl->memcat, cl->isC ? int(sizeCclosure(cl->nupvalues)) : int(sizeLclosure(cl->nupvalues))
+    );
 
     fprintf(f, ",\"env\":");
     dumpref(f, obj2gco(cl->env));
@@ -824,6 +825,14 @@ static void enumproto(EnumContext* ctx, Proto* p)
     size_t size = sizeof(Proto) + sizeof(Instruction) * p->sizecode + sizeof(Proto*) * p->sizep + sizeof(TValue) * p->sizek + p->sizelineinfo +
                   sizeof(LocVar) * p->sizelocvars + sizeof(TString*) * p->sizeupvalues;
 
+    if (p->execdata && ctx->L->global->ecb.getmemorysize)
+    {
+        size_t nativesize = ctx->L->global->ecb.getmemorysize(ctx->L, p);
+
+        ctx->node(ctx->context, p->execdata, uint8_t(LUA_TNONE), p->memcat, nativesize, NULL);
+        ctx->edge(ctx->context, enumtopointer(obj2gco(p)), p->execdata, "[native]");
+    }
+
     enumnode(ctx, obj2gco(p), size, p->source ? getstr(p->source) : NULL);
 
     if (p->sizek)
@@ -880,8 +889,12 @@ static bool enumgco(void* context, lua_Page* page, GCObject* gco)
     return false;
 }
 
-void luaC_enumheap(lua_State* L, void* context, void (*node)(void* context, void* ptr, uint8_t tt, uint8_t memcat, size_t size, const char* name),
-    void (*edge)(void* context, void* from, void* to, const char* name))
+void luaC_enumheap(
+    lua_State* L,
+    void* context,
+    void (*node)(void* context, void* ptr, uint8_t tt, uint8_t memcat, size_t size, const char* name),
+    void (*edge)(void* context, void* from, void* to, const char* name)
+)
 {
     global_State* g = L->global;
 

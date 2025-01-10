@@ -23,10 +23,12 @@ endif()
 
 project(Luau LANGUAGES CXX C)
 add_library(Luau.Common INTERFACE)
+add_library(Luau.CLI.lib STATIC)
 add_library(Luau.Ast STATIC)
 add_library(Luau.Compiler STATIC)
 add_library(Luau.Config STATIC)
 add_library(Luau.Analysis STATIC)
+add_library(Luau.EqSat STATIC)
 add_library(Luau.CodeGen STATIC)
 add_library(Luau.VM STATIC)
 add_library(isocline STATIC)
@@ -65,6 +67,10 @@ include(Sources.cmake)
 
 target_include_directories(Luau.Common INTERFACE Common/include)
 
+target_compile_features(Luau.CLI.lib PUBLIC cxx_std_17)
+target_include_directories(Luau.CLI.lib PUBLIC CLI/include)
+target_link_libraries(Luau.CLI.lib PRIVATE Luau.Common Luau.Config)
+
 target_compile_features(Luau.Ast PUBLIC cxx_std_17)
 target_include_directories(Luau.Ast PUBLIC Ast/include)
 target_link_libraries(Luau.Ast PUBLIC Luau.Common)
@@ -79,7 +85,12 @@ target_link_libraries(Luau.Config PUBLIC Luau.Ast)
 
 target_compile_features(Luau.Analysis PUBLIC cxx_std_17)
 target_include_directories(Luau.Analysis PUBLIC Analysis/include)
-target_link_libraries(Luau.Analysis PUBLIC Luau.Ast Luau.Config)
+target_link_libraries(Luau.Analysis PUBLIC Luau.Ast Luau.EqSat Luau.Config)
+target_link_libraries(Luau.Analysis PRIVATE Luau.Compiler Luau.VM)
+
+target_compile_features(Luau.EqSat PUBLIC cxx_std_17)
+target_include_directories(Luau.EqSat PUBLIC EqSat/include)
+target_link_libraries(Luau.EqSat PUBLIC Luau.Common)
 
 target_compile_features(Luau.CodeGen PRIVATE cxx_std_17)
 target_include_directories(Luau.CodeGen PUBLIC CodeGen/include)
@@ -102,6 +113,7 @@ if(MSVC)
     list(APPEND LUAU_OPTIONS "/we4388") # Also signed/unsigned mismatch
 else()
     list(APPEND LUAU_OPTIONS -Wall) # All warnings
+    list(APPEND LUAU_OPTIONS -Wimplicit-fallthrough)
     list(APPEND LUAU_OPTIONS -Wsign-compare) # This looks to be included in -Wall for GCC but not clang
 endif()
 
@@ -113,6 +125,8 @@ if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     # Some gcc versions treat var in `if (type var = val)` as unused
     # Some gcc versions treat variables used in constexpr if blocks as unused
     list(APPEND LUAU_OPTIONS -Wno-unused)
+    # some gcc versions warn maybe uninitialized on optional<string> members on structs
+    list(APPEND LUAU_OPTIONS -Wno-maybe-uninitialized)
 endif()
 
 # Enabled in CI; we should be warning free on our main compiler versions but don't guarantee being warning free everywhere
@@ -137,6 +151,8 @@ endif()
 
 target_compile_options(Luau.Ast PRIVATE ${LUAU_OPTIONS})
 target_compile_options(Luau.Analysis PRIVATE ${LUAU_OPTIONS})
+target_compile_options(Luau.EqSat PRIVATE ${LUAU_OPTIONS})
+target_compile_options(Luau.CLI.lib PRIVATE ${LUAU_OPTIONS})
 target_compile_options(Luau.CodeGen PRIVATE ${LUAU_OPTIONS})
 target_compile_options(Luau.VM PRIVATE ${LUAU_OPTIONS})
 target_compile_options(isocline PRIVATE ${LUAU_OPTIONS} ${ISOCLINE_OPTIONS})
@@ -183,6 +199,12 @@ if(MSVC_IDE)
     target_sources(Luau.VM PRIVATE tools/natvis/VM.natvis)
 endif()
 
+# On Windows and Android threads are provided, on Linux/Mac/iOS we use pthreads
+add_library(osthreads INTERFACE)
+if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin|iOS")
+    target_link_libraries(osthreads INTERFACE "-lpthread")
+endif ()
+
 if(LUAU_BUILD_CLI)
     target_compile_options(Luau.Repl.CLI PRIVATE ${LUAU_OPTIONS})
     target_compile_options(Luau.Reduce.CLI PRIVATE ${LUAU_OPTIONS})
@@ -193,27 +215,22 @@ if(LUAU_BUILD_CLI)
 
     target_include_directories(Luau.Repl.CLI PRIVATE extern extern/isocline/include)
 
-    target_link_libraries(Luau.Repl.CLI PRIVATE Luau.Compiler Luau.Config Luau.CodeGen Luau.VM isocline)
+    target_link_libraries(Luau.Repl.CLI PRIVATE Luau.Compiler Luau.Config Luau.CodeGen Luau.VM Luau.CLI.lib isocline)
 
-    if(UNIX)
-        find_library(LIBPTHREAD pthread)
-        if (LIBPTHREAD)
-            target_link_libraries(Luau.Repl.CLI PRIVATE pthread)
-            target_link_libraries(Luau.Analyze.CLI PRIVATE pthread)
-        endif()
-    endif()
+    target_link_libraries(Luau.Repl.CLI PRIVATE osthreads)
+    target_link_libraries(Luau.Analyze.CLI PRIVATE osthreads)
 
-    target_link_libraries(Luau.Analyze.CLI PRIVATE Luau.Analysis)
+    target_link_libraries(Luau.Analyze.CLI PRIVATE Luau.Analysis Luau.CLI.lib)
 
-    target_link_libraries(Luau.Ast.CLI PRIVATE Luau.Ast Luau.Analysis)
+    target_link_libraries(Luau.Ast.CLI PRIVATE Luau.Ast Luau.Analysis Luau.CLI.lib)
 
     target_compile_features(Luau.Reduce.CLI PRIVATE cxx_std_17)
     target_include_directories(Luau.Reduce.CLI PUBLIC Reduce/include)
-    target_link_libraries(Luau.Reduce.CLI PRIVATE Luau.Common Luau.Ast Luau.Analysis)
+    target_link_libraries(Luau.Reduce.CLI PRIVATE Luau.Common Luau.Ast Luau.Analysis Luau.CLI.lib)
 
-    target_link_libraries(Luau.Compile.CLI PRIVATE Luau.Compiler Luau.VM Luau.CodeGen)
+    target_link_libraries(Luau.Compile.CLI PRIVATE Luau.Compiler Luau.VM Luau.CodeGen Luau.CLI.lib)
 
-    target_link_libraries(Luau.Bytecode.CLI PRIVATE Luau.Compiler Luau.VM Luau.CodeGen)
+    target_link_libraries(Luau.Bytecode.CLI PRIVATE Luau.Compiler Luau.VM Luau.CodeGen Luau.CLI.lib)
 endif()
 
 if(LUAU_BUILD_TESTS)
@@ -223,20 +240,20 @@ if(LUAU_BUILD_TESTS)
     target_link_libraries(Luau.UnitTest PRIVATE Luau.Analysis Luau.Compiler Luau.CodeGen)
 
     target_compile_options(Luau.Conformance PRIVATE ${LUAU_OPTIONS})
+    target_compile_definitions(Luau.Conformance PRIVATE DOCTEST_CONFIG_DOUBLE_STRINGIFY)
     target_include_directories(Luau.Conformance PRIVATE extern)
     target_link_libraries(Luau.Conformance PRIVATE Luau.Analysis Luau.Compiler Luau.CodeGen Luau.VM)
-    file(REAL_PATH "tests/conformance" LUAU_CONFORMANCE_SOURCE_DIR)
+    if(CMAKE_SYSTEM_NAME MATCHES "Android|iOS")
+        set(LUAU_CONFORMANCE_SOURCE_DIR "Client/Luau/tests/conformance")
+    else ()
+        file(REAL_PATH "tests/conformance" LUAU_CONFORMANCE_SOURCE_DIR)
+    endif ()
     target_compile_definitions(Luau.Conformance PRIVATE LUAU_CONFORMANCE_SOURCE_DIR="${LUAU_CONFORMANCE_SOURCE_DIR}")
 
     target_compile_options(Luau.CLI.Test PRIVATE ${LUAU_OPTIONS})
     target_include_directories(Luau.CLI.Test PRIVATE extern CLI)
-    target_link_libraries(Luau.CLI.Test PRIVATE Luau.Compiler Luau.Config Luau.CodeGen Luau.VM isocline)
-    if(UNIX)
-        find_library(LIBPTHREAD pthread)
-        if (LIBPTHREAD)
-            target_link_libraries(Luau.CLI.Test PRIVATE pthread)
-        endif()
-    endif()
+    target_link_libraries(Luau.CLI.Test PRIVATE Luau.Compiler Luau.Config Luau.CodeGen Luau.VM Luau.CLI.lib isocline)
+    target_link_libraries(Luau.CLI.Test PRIVATE osthreads)
 
 endif()
 
@@ -257,13 +274,13 @@ endif()
 add_subdirectory(fuzz)
 
 # validate dependencies for internal libraries
-foreach(LIB Luau.Ast Luau.Compiler Luau.Config Luau.Analysis Luau.CodeGen Luau.VM)
+foreach(LIB Luau.Ast Luau.Compiler Luau.Config Luau.Analysis Luau.EqSat Luau.CodeGen Luau.VM)
     if(TARGET ${LIB})
         get_target_property(DEPENDS ${LIB} LINK_LIBRARIES)
         if(LIB MATCHES "CodeGen|VM" AND DEPENDS MATCHES "Ast|Analysis|Config|Compiler")
             message(FATAL_ERROR ${LIB} " is a runtime component but it depends on one of the offline components")
         endif()
-        if(LIB MATCHES "Ast|Analysis|Compiler" AND DEPENDS MATCHES "CodeGen|VM")
+        if(LIB MATCHES "Ast|EqSat|Compiler" AND DEPENDS MATCHES "CodeGen|VM")
             message(FATAL_ERROR ${LIB} " is an offline component but it depends on one of the runtime components")
         endif()
         if(LIB MATCHES "Ast|Compiler" AND DEPENDS MATCHES "Analysis|Config")

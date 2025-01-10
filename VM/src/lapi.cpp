@@ -39,8 +39,8 @@ const char* lua_ident = "$Lua: Lua 5.1.4 Copyright (C) 1994-2008 Lua.org, PUC-Ri
                         "$Authors: R. Ierusalimschy, L. H. de Figueiredo & W. Celes $\n"
                         "$URL: www.lua.org $\n";
 
-const char* luau_ident = "$Luau: Copyright (C) 2019-2023 Roblox Corporation $\n"
-                         "$URL: luau-lang.org $\n";
+const char* luau_ident = "$Luau: Copyright (C) 2019-2024 Roblox Corporation $\n"
+                         "$URL: luau.org $\n";
 
 #define api_checknelems(L, n) api_check(L, (n) <= (L->top - L->base))
 
@@ -1283,6 +1283,26 @@ void* lua_newuserdatatagged(lua_State* L, size_t sz, int tag)
     return u->data;
 }
 
+void* lua_newuserdatataggedwithmetatable(lua_State* L, size_t sz, int tag)
+{
+    api_check(L, unsigned(tag) < LUA_UTAG_LIMIT);
+    luaC_checkGC(L);
+    luaC_threadbarrier(L);
+    Udata* u = luaU_newudata(L, sz, tag);
+
+    // currently, we always allocate unmarked objects, so forward barrier can be skipped
+    LUAU_ASSERT(!isblack(obj2gco(u)));
+
+    Table* h = L->global->udatamt[tag];
+    api_check(L, h != nullptr);
+
+    u->metatable = h;
+
+    setuvalue(L, L->top, u);
+    api_incr_top(L);
+    return u->data;
+}
+
 void* lua_newuserdatadtor(lua_State* L, size_t sz, void (*dtor)(void*))
 {
     luaC_checkGC(L);
@@ -1425,6 +1445,33 @@ lua_Destructor lua_getuserdatadtor(lua_State* L, int tag)
 {
     api_check(L, unsigned(tag) < LUA_UTAG_LIMIT);
     return L->global->udatagc[tag];
+}
+
+void lua_setuserdatametatable(lua_State* L, int tag, int idx)
+{
+    api_check(L, unsigned(tag) < LUA_UTAG_LIMIT);
+    api_check(L, !L->global->udatamt[tag]); // reassignment not supported
+    StkId o = index2addr(L, idx);
+    api_check(L, ttistable(o));
+    L->global->udatamt[tag] = hvalue(o);
+    L->top--;
+}
+
+void lua_getuserdatametatable(lua_State* L, int tag)
+{
+    api_check(L, unsigned(tag) < LUA_UTAG_LIMIT);
+    luaC_threadbarrier(L);
+
+    if (Table* h = L->global->udatamt[tag])
+    {
+        sethvalue(L, L->top, h);
+    }
+    else
+    {
+        setnilvalue(L->top);
+    }
+
+    api_incr_top(L);
 }
 
 void lua_setlightuserdataname(lua_State* L, int tag, const char* name)

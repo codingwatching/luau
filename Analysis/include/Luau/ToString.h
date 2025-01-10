@@ -12,7 +12,6 @@
 
 LUAU_FASTINT(LuauTableTypeMaximumStringifierLength)
 LUAU_FASTINT(LuauTypeMaximumStringifierLength)
-LUAU_FASTFLAG(LuauToStringSimpleCompositeTypesSingleLine)
 
 namespace Luau
 {
@@ -36,7 +35,6 @@ struct ToStringOptions
 {
     ToStringOptions(bool exhaustive = false)
         : exhaustive(exhaustive)
-        , compositeTypesSingleLineLimit(FFlag::LuauToStringSimpleCompositeTypesSingleLine ? 5 : 0)
     {
     }
 
@@ -46,6 +44,7 @@ struct ToStringOptions
     bool hideTableKind = false;                   // If true, all tables will be surrounded with plain '{}'
     bool hideNamedFunctionTypeParameters = false; // If true, type parameters of functions will be hidden at top-level.
     bool hideFunctionSelfArgument = false;        // If true, `self: X` will be omitted from the function signature if the function has self
+    bool useQuestionMarks = true;                 // If true, use a postfix ? for options, else write them out as unions that include nil.
     size_t maxTableLength = size_t(FInt::LuauTableTypeMaximumStringifierLength); // Only applied to TableTypes
     size_t maxTypeLength = size_t(FInt::LuauTypeMaximumStringifierLength);
     size_t compositeTypesSingleLineLimit = 5; // The number of type elements permitted on a single line when printing type unions/intersections

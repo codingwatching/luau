@@ -149,7 +149,7 @@ void lua_resetthread(lua_State* L)
     L->nCcalls = L->baseCcalls = 0;
     // clear thread stack
     if (L->stacksize != BASIC_STACK_SIZE + EXTRA_STACK)
-        luaD_reallocstack(L, BASIC_STACK_SIZE);
+        luaD_reallocstack(L, BASIC_STACK_SIZE, 0);
     for (int i = 0; i < L->stacksize; i++)
         setnilvalue(L->stack + i);
 }
@@ -204,12 +204,16 @@ lua_State* lua_newstate(lua_Alloc f, void* ud)
         g->freepages[i] = NULL;
         g->freegcopages[i] = NULL;
     }
+    g->allpages = NULL;
     g->allgcopages = NULL;
     g->sweepgcopage = NULL;
     for (i = 0; i < LUA_T_COUNT; i++)
         g->mt[i] = NULL;
     for (i = 0; i < LUA_UTAG_LIMIT; i++)
+    {
         g->udatagc[i] = NULL;
+        g->udatamt[i] = NULL;
+    }
     for (i = 0; i < LUA_LUTAG_LIMIT; i++)
         g->lightuserdataname[i] = NULL;
     for (i = 0; i < LUA_MEMORY_CATEGORIES; i++)

@@ -1,75 +1,18 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/Lexer.h"
 
+#include "Luau/Allocator.h"
 #include "Luau/Common.h"
 #include "Luau/Confusables.h"
 #include "Luau/StringUtils.h"
 
 #include <limits.h>
 
-LUAU_FASTFLAGVARIABLE(LuauLexerLookaheadRemembersBraceType, false)
-LUAU_FASTFLAGVARIABLE(LuauCheckedFunctionSyntax, false)
+LUAU_FASTFLAGVARIABLE(LexerResumesFromPosition2)
+LUAU_FASTFLAGVARIABLE(LexerFixInterpStringStart)
 
 namespace Luau
 {
-
-Allocator::Allocator()
-    : root(static_cast<Page*>(operator new(sizeof(Page))))
-    , offset(0)
-{
-    root->next = nullptr;
-}
-
-Allocator::Allocator(Allocator&& rhs)
-    : root(rhs.root)
-    , offset(rhs.offset)
-{
-    rhs.root = nullptr;
-    rhs.offset = 0;
-}
-
-Allocator::~Allocator()
-{
-    Page* page = root;
-
-    while (page)
-    {
-        Page* next = page->next;
-
-        operator delete(page);
-
-        page = next;
-    }
-}
-
-void* Allocator::allocate(size_t size)
-{
-    constexpr size_t align = alignof(void*) > alignof(double) ? alignof(void*) : alignof(double);
-
-    if (root)
-    {
-        uintptr_t data = reinterpret_cast<uintptr_t>(root->data);
-        uintptr_t result = (data + offset + align - 1) & ~(align - 1);
-        if (result + size <= data + sizeof(root->data))
-        {
-            offset = result - data + size;
-            return reinterpret_cast<void*>(result);
-        }
-    }
-
-    // allocate new page
-    size_t pageSize = size > sizeof(root->data) ? size : sizeof(root->data);
-    void* pageData = operator new(offsetof(Page, data) + pageSize);
-
-    Page* page = static_cast<Page*>(pageData);
-
-    page->next = root;
-
-    root = page;
-    offset = size;
-
-    return page->data;
-}
 
 Lexeme::Lexeme(const Location& location, Type type)
     : type(type)
@@ -93,8 +36,10 @@ Lexeme::Lexeme(const Location& location, Type type, const char* data, size_t siz
     , length(unsigned(size))
     , data(data)
 {
-    LUAU_ASSERT(type == RawString || type == QuotedString || type == InterpStringBegin || type == InterpStringMid || type == InterpStringEnd ||
-                type == InterpStringSimple || type == BrokenInterpDoubleBrace || type == Number || type == Comment || type == BlockComment);
+    LUAU_ASSERT(
+        type == RawString || type == QuotedString || type == InterpStringBegin || type == InterpStringMid || type == InterpStringEnd ||
+        type == InterpStringSimple || type == BrokenInterpDoubleBrace || type == Number || type == Comment || type == BlockComment
+    );
 }
 
 Lexeme::Lexeme(const Location& location, Type type, const char* name)
@@ -103,11 +48,21 @@ Lexeme::Lexeme(const Location& location, Type type, const char* name)
     , length(0)
     , name(name)
 {
-    LUAU_ASSERT(type == Name || (type >= Reserved_BEGIN && type < Lexeme::Reserved_END));
+    LUAU_ASSERT(type == Name || type == Attribute || (type >= Reserved_BEGIN && type < Lexeme::Reserved_END));
 }
 
-static const char* kReserved[] = {"and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in", "local", "nil", "not", "or",
-    "repeat", "return", "then", "true", "until", "while", "@checked"};
+unsigned int Lexeme::getLength() const
+{
+    LUAU_ASSERT(
+        type == RawString || type == QuotedString || type == InterpStringBegin || type == InterpStringMid || type == InterpStringEnd ||
+        type == InterpStringSimple || type == BrokenInterpDoubleBrace || type == Number || type == Comment || type == BlockComment
+    );
+
+    return length;
+}
+
+static const char* kReserved[] = {"and",   "break", "do",  "else", "elseif", "end",    "false", "for",  "function", "if",   "in",
+                                  "local", "nil",   "not", "or",   "repeat", "return", "then",  "true", "until",    "while"};
 
 std::string Lexeme::toString() const
 {
@@ -191,6 +146,9 @@ std::string Lexeme::toString() const
 
     case Comment:
         return "comment";
+
+    case Attribute:
+        return name ? format("'%s'", name) : "attribute";
 
     case BrokenString:
         return "malformed string";
@@ -279,7 +237,7 @@ std::pair<AstName, Lexeme::Type> AstNameTable::getOrAddWithType(const char* name
     nameData[length] = 0;
 
     const_cast<Entry&>(entry).value = AstName(nameData);
-    const_cast<Entry&>(entry).type = Lexeme::Name;
+    const_cast<Entry&>(entry).type = (name[0] == '@' ? Lexeme::Attribute : Lexeme::Name);
 
     return std::make_pair(entry.value, entry.type);
 }
@@ -348,13 +306,16 @@ static char unescape(char ch)
     }
 }
 
-Lexer::Lexer(const char* buffer, size_t bufferSize, AstNameTable& names)
+Lexer::Lexer(const char* buffer, size_t bufferSize, AstNameTable& names, Position startPosition)
     : buffer(buffer)
     , bufferSize(bufferSize)
     , offset(0)
-    , line(0)
-    , lineOffset(0)
-    , lexeme(Location(Position(0, 0), 0), Lexeme::Eof)
+    , line(FFlag::LexerResumesFromPosition2 ? startPosition.line : 0)
+    , lineOffset(FFlag::LexerResumesFromPosition2 ? 0u - startPosition.column : 0)
+    , lexeme(
+          (FFlag::LexerResumesFromPosition2 ? Location(Position(startPosition.line, startPosition.column), 0) : Location(Position(0, 0), 0)),
+          Lexeme::Eof
+      )
     , names(names)
     , skipComments(false)
     , readNames(true)
@@ -420,13 +381,11 @@ Lexeme Lexer::lookahead()
     lineOffset = currentLineOffset;
     lexeme = currentLexeme;
     prevLocation = currentPrevLocation;
-    if (FFlag::LuauLexerLookaheadRemembersBraceType)
-    {
-        if (braceStack.size() < currentBraceStackSize)
-            braceStack.push_back(currentBraceType);
-        else if (braceStack.size() > currentBraceStackSize)
-            braceStack.pop_back();
-    }
+
+    if (braceStack.size() < currentBraceStackSize)
+        braceStack.push_back(currentBraceType);
+    else if (braceStack.size() > currentBraceStackSize)
+        braceStack.pop_back();
 
     return result;
 }
@@ -452,6 +411,7 @@ char Lexer::peekch(unsigned int lookahead) const
     return (offset + lookahead < bufferSize) ? buffer[offset + lookahead] : 0;
 }
 
+LUAU_FORCEINLINE
 Position Lexer::position() const
 {
     return Position(line, offset - lineOffset);
@@ -801,7 +761,7 @@ Lexeme Lexer::readNext()
             return Lexeme(Location(start, 1), '}');
         }
 
-        return readInterpolatedStringSection(position(), Lexeme::InterpStringMid, Lexeme::InterpStringEnd);
+        return readInterpolatedStringSection(FFlag::LexerFixInterpStringStart ? start : position(), Lexeme::InterpStringMid, Lexeme::InterpStringEnd);
     }
 
     case '=':
@@ -995,17 +955,8 @@ Lexeme Lexer::readNext()
     }
     case '@':
     {
-        if (FFlag::LuauCheckedFunctionSyntax)
-        {
-            // We're trying to lex the token @checked
-            LUAU_ASSERT(peekch() == '@');
-
-            std::pair<AstName, Lexeme::Type> maybeChecked = readName();
-            if (maybeChecked.second != Lexeme::ReservedChecked)
-                return Lexeme(Location(start, position()), Lexeme::Error);
-
-            return Lexeme(Location(start, position()), maybeChecked.second, maybeChecked.first.value);
-        }
+        std::pair<AstName, Lexeme::Type> attribute = readName();
+        return Lexeme(Location(start, position()), Lexeme::Attribute, attribute.first.value);
     }
     default:
         if (isDigit(peekch()))

@@ -4,19 +4,24 @@
 #include "Luau/IrUtils.h"
 
 #include "lua.h"
+#include "lobject.h"
+#include "lstate.h"
 
 #include <stdarg.h>
+
+LUAU_FASTFLAG(LuauVectorLibNativeDot);
 
 namespace Luau
 {
 namespace CodeGen
 {
 
-static const char* textForCondition[] = {
-    "eq", "not_eq", "lt", "not_lt", "le", "not_le", "gt", "not_gt", "ge", "not_ge", "u_lt", "u_le", "u_gt", "u_ge"};
+static const char* textForCondition[] =
+    {"eq", "not_eq", "lt", "not_lt", "le", "not_le", "gt", "not_gt", "ge", "not_ge", "u_lt", "u_le", "u_gt", "u_ge"};
 static_assert(sizeof(textForCondition) / sizeof(textForCondition[0]) == size_t(IrCondition::Count), "all conditions have to be covered");
 
 const int kDetailsAlignColumn = 60;
+const unsigned kMaxStringConstantPrintLength = 16;
 
 LUAU_PRINTF_ATTR(2, 3)
 static void append(std::string& result, const char* fmt, ...)
@@ -35,6 +40,17 @@ static void padToDetailColumn(std::string& result, size_t lineStart)
 
     if (pad > 0)
         result.append(pad, ' ');
+}
+
+static bool isPrintableStringConstant(const char* str, size_t len)
+{
+    for (size_t i = 0; i < len; ++i)
+    {
+        if (unsigned(str[i]) < ' ')
+            return false;
+    }
+
+    return true;
 }
 
 static const char* getTagName(uint8_t tag)
@@ -151,6 +167,8 @@ const char* getCmdName(IrCmd cmd)
         return "SQRT_NUM";
     case IrCmd::ABS_NUM:
         return "ABS_NUM";
+    case IrCmd::SIGN_NUM:
+        return "SIGN_NUM";
     case IrCmd::ADD_VEC:
         return "ADD_VEC";
     case IrCmd::SUB_VEC:
@@ -161,6 +179,9 @@ const char* getCmdName(IrCmd cmd)
         return "DIV_VEC";
     case IrCmd::UNM_VEC:
         return "UNM_VEC";
+    case IrCmd::DOT_VEC:
+        LUAU_ASSERT(FFlag::LuauVectorLibNativeDot);
+        return "DOT_VEC";
     case IrCmd::NOT_ANY:
         return "NOT_ANY";
     case IrCmd::CMP_ANY:
@@ -197,6 +218,8 @@ const char* getCmdName(IrCmd cmd)
         return "TRY_NUM_TO_INDEX";
     case IrCmd::TRY_CALL_FASTGETTM:
         return "TRY_CALL_FASTGETTM";
+    case IrCmd::NEW_USERDATA:
+        return "NEW_USERDATA";
     case IrCmd::INT_TO_NUM:
         return "INT_TO_NUM";
     case IrCmd::UINT_TO_NUM:
@@ -255,6 +278,8 @@ const char* getCmdName(IrCmd cmd)
         return "CHECK_NODE_VALUE";
     case IrCmd::CHECK_BUFFER_LEN:
         return "CHECK_BUFFER_LEN";
+    case IrCmd::CHECK_USERDATA_TAG:
+        return "CHECK_USERDATA_TAG";
     case IrCmd::INTERRUPT:
         return "INTERRUPT";
     case IrCmd::CHECK_GC:
@@ -397,7 +422,8 @@ void toString(IrToStringContext& ctx, const IrInst& inst, uint32_t index)
 
     ctx.result.append(getCmdName(inst.cmd));
 
-    auto checkOp = [&ctx](IrOp op, const char* sep) {
+    auto checkOp = [&ctx](IrOp op, const char* sep)
+    {
         if (op.kind != IrOpKind::None)
         {
             ctx.result.append(sep);
@@ -411,11 +437,59 @@ void toString(IrToStringContext& ctx, const IrInst& inst, uint32_t index)
     checkOp(inst.d, ", ");
     checkOp(inst.e, ", ");
     checkOp(inst.f, ", ");
+    checkOp(inst.g, ", ");
 }
 
 void toString(IrToStringContext& ctx, const IrBlock& block, uint32_t index)
 {
     append(ctx.result, "%s_%u", getBlockKindName(block.kind), index);
+}
+
+static void appendVmConstant(std::string& result, Proto* proto, int index)
+{
+    TValue constant = proto->k[index];
+
+    if (constant.tt == LUA_TNIL)
+    {
+        append(result, "nil");
+    }
+    else if (constant.tt == LUA_TBOOLEAN)
+    {
+        append(result, constant.value.b != 0 ? "true" : "false");
+    }
+    else if (constant.tt == LUA_TNUMBER)
+    {
+        if (constant.value.n != constant.value.n)
+            append(result, "nan");
+        else
+            append(result, "%.17g", constant.value.n);
+    }
+    else if (constant.tt == LUA_TSTRING)
+    {
+        TString* str = gco2ts(constant.value.gc);
+        const char* data = getstr(str);
+
+        if (isPrintableStringConstant(data, str->len))
+        {
+            if (str->len < kMaxStringConstantPrintLength)
+                append(result, "'%.*s'", int(str->len), data);
+            else
+                append(result, "'%.*s'...", int(kMaxStringConstantPrintLength), data);
+        }
+    }
+    else if (constant.tt == LUA_TVECTOR)
+    {
+        const float* v = constant.value.v;
+
+#if LUA_VECTOR_SIZE == 4
+        if (v[3] != 0)
+            append(result, "%.9g, %.9g, %.9g, %.9g", v[0], v[1], v[2], v[3]);
+        else
+            append(result, "%.9g, %.9g, %.9g", v[0], v[1], v[2]);
+#else
+        append(result, "%.9g, %.9g, %.9g", v[0], v[1], v[2]);
+#endif
+    }
 }
 
 void toString(IrToStringContext& ctx, IrOp op)
@@ -445,6 +519,14 @@ void toString(IrToStringContext& ctx, IrOp op)
         break;
     case IrOpKind::VmConst:
         append(ctx.result, "K%d", vmConstOp(op));
+
+        if (ctx.proto)
+        {
+            append(ctx.result, " (");
+            appendVmConstant(ctx.result, ctx.proto, vmConstOp(op));
+            append(ctx.result, ")");
+        }
+
         break;
     case IrOpKind::VmUpvalue:
         append(ctx.result, "U%d", vmUpvalueOp(op));
@@ -480,8 +562,19 @@ void toString(std::string& result, IrConst constant)
     }
 }
 
-const char* getBytecodeTypeName(uint8_t type)
+const char* getBytecodeTypeName(uint8_t type, const char* const* userdataTypes)
 {
+    // Optional bit should be handled externally
+    type = type & ~LBC_TYPE_OPTIONAL_BIT;
+
+    if (type >= LBC_TYPE_TAGGED_USERDATA_BASE && type < LBC_TYPE_TAGGED_USERDATA_END)
+    {
+        if (userdataTypes)
+            return userdataTypes[type - LBC_TYPE_TAGGED_USERDATA_BASE];
+
+        return "userdata";
+    }
+
     switch (type)
     {
     case LBC_TYPE_NIL:
@@ -512,13 +605,19 @@ const char* getBytecodeTypeName(uint8_t type)
     return nullptr;
 }
 
-void toString(std::string& result, const BytecodeTypes& bcTypes)
+void toString(std::string& result, const BytecodeTypes& bcTypes, const char* const* userdataTypes)
 {
+    append(result, "%s%s", getBytecodeTypeName(bcTypes.result, userdataTypes), (bcTypes.result & LBC_TYPE_OPTIONAL_BIT) != 0 ? "?" : "");
+    append(result, " <- ");
+    append(result, "%s%s", getBytecodeTypeName(bcTypes.a, userdataTypes), (bcTypes.a & LBC_TYPE_OPTIONAL_BIT) != 0 ? "?" : "");
+    append(result, ", ");
+    append(result, "%s%s", getBytecodeTypeName(bcTypes.b, userdataTypes), (bcTypes.b & LBC_TYPE_OPTIONAL_BIT) != 0 ? "?" : "");
+
     if (bcTypes.c != LBC_TYPE_ANY)
-        append(result, "%s <- %s, %s, %s", getBytecodeTypeName(bcTypes.result), getBytecodeTypeName(bcTypes.a), getBytecodeTypeName(bcTypes.b),
-            getBytecodeTypeName(bcTypes.c));
-    else
-        append(result, "%s <- %s, %s", getBytecodeTypeName(bcTypes.result), getBytecodeTypeName(bcTypes.a), getBytecodeTypeName(bcTypes.b));
+    {
+        append(result, ", ");
+        append(result, "%s%s", getBytecodeTypeName(bcTypes.c, userdataTypes), (bcTypes.c & LBC_TYPE_OPTIONAL_BIT) != 0 ? "?" : "");
+    }
 }
 
 static void appendBlockSet(IrToStringContext& ctx, BlockIteratorWrapper blocks)
@@ -583,6 +682,8 @@ static RegisterSet getJumpTargetExtraLiveIn(IrToStringContext& ctx, const IrBloc
         op = inst.e;
     else if (inst.f.kind == IrOpKind::Block)
         op = inst.f;
+    else if (inst.g.kind == IrOpKind::Block)
+        op = inst.g;
 
     if (op.kind == IrOpKind::Block && op.index < ctx.cfg.in.size())
     {
@@ -598,7 +699,13 @@ static RegisterSet getJumpTargetExtraLiveIn(IrToStringContext& ctx, const IrBloc
 }
 
 void toStringDetailed(
-    IrToStringContext& ctx, const IrBlock& block, uint32_t blockIdx, const IrInst& inst, uint32_t instIdx, IncludeUseInfo includeUseInfo)
+    IrToStringContext& ctx,
+    const IrBlock& block,
+    uint32_t blockIdx,
+    const IrInst& inst,
+    uint32_t instIdx,
+    IncludeUseInfo includeUseInfo
+)
 {
     size_t start = ctx.result.size();
 
@@ -641,8 +748,14 @@ void toStringDetailed(
     }
 }
 
-void toStringDetailed(IrToStringContext& ctx, const IrBlock& block, uint32_t blockIdx, IncludeUseInfo includeUseInfo, IncludeCfgInfo includeCfgInfo,
-    IncludeRegFlowInfo includeRegFlowInfo)
+void toStringDetailed(
+    IrToStringContext& ctx,
+    const IrBlock& block,
+    uint32_t blockIdx,
+    IncludeUseInfo includeUseInfo,
+    IncludeCfgInfo includeCfgInfo,
+    IncludeRegFlowInfo includeRegFlowInfo
+)
 {
     // Report captured registers for entry block
     if (includeRegFlowInfo == IncludeRegFlowInfo::Yes && block.useCount == 0 && block.kind != IrBlockKind::Dead && ctx.cfg.captured.regs.any())
@@ -726,7 +839,7 @@ void toStringDetailed(IrToStringContext& ctx, const IrBlock& block, uint32_t blo
 std::string toString(const IrFunction& function, IncludeUseInfo includeUseInfo)
 {
     std::string result;
-    IrToStringContext ctx{result, function.blocks, function.constants, function.cfg};
+    IrToStringContext ctx{result, function.blocks, function.constants, function.cfg, function.proto};
 
     for (size_t i = 0; i < function.blocks.size(); i++)
     {
@@ -833,7 +946,7 @@ static void appendBlocks(IrToStringContext& ctx, const IrFunction& function, boo
 std::string toDot(const IrFunction& function, bool includeInst)
 {
     std::string result;
-    IrToStringContext ctx{result, function.blocks, function.constants, function.cfg};
+    IrToStringContext ctx{result, function.blocks, function.constants, function.cfg, function.proto};
 
     append(ctx.result, "digraph CFG {\n");
     append(ctx.result, "node[shape=record]\n");
@@ -851,7 +964,8 @@ std::string toDot(const IrFunction& function, bool includeInst)
         {
             const IrInst& inst = function.instructions[instIdx];
 
-            auto checkOp = [&](IrOp op) {
+            auto checkOp = [&](IrOp op)
+            {
                 if (op.kind == IrOpKind::Block)
                 {
                     if (function.blocks[op.index].kind != IrBlockKind::Fallback)
@@ -867,6 +981,7 @@ std::string toDot(const IrFunction& function, bool includeInst)
             checkOp(inst.d);
             checkOp(inst.e);
             checkOp(inst.f);
+            checkOp(inst.g);
         }
     }
 
@@ -878,7 +993,7 @@ std::string toDot(const IrFunction& function, bool includeInst)
 std::string toDotCfg(const IrFunction& function)
 {
     std::string result;
-    IrToStringContext ctx{result, function.blocks, function.constants, function.cfg};
+    IrToStringContext ctx{result, function.blocks, function.constants, function.cfg, function.proto};
 
     append(ctx.result, "digraph CFG {\n");
     append(ctx.result, "node[shape=record]\n");
@@ -901,7 +1016,7 @@ std::string toDotCfg(const IrFunction& function)
 std::string toDotDjGraph(const IrFunction& function)
 {
     std::string result;
-    IrToStringContext ctx{result, function.blocks, function.constants, function.cfg};
+    IrToStringContext ctx{result, function.blocks, function.constants, function.cfg, function.proto};
 
     append(ctx.result, "digraph CFG {\n");
 

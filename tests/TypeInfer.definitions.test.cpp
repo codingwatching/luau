@@ -9,6 +9,8 @@
 
 using namespace Luau;
 
+LUAU_FASTFLAG(LuauNewSolverPrePopulateClasses)
+
 TEST_SUITE_BEGIN("DefinitionTests");
 
 TEST_CASE_FIXTURE(Fixture, "definition_file_simple")
@@ -78,21 +80,31 @@ TEST_CASE_FIXTURE(Fixture, "definition_file_loading")
 TEST_CASE_FIXTURE(Fixture, "load_definition_file_errors_do_not_pollute_global_scope")
 {
     unfreeze(frontend.globals.globalTypes);
-    LoadDefinitionFileResult parseFailResult = frontend.loadDefinitionFile(frontend.globals, frontend.globals.globalScope, R"(
+    LoadDefinitionFileResult parseFailResult = frontend.loadDefinitionFile(
+        frontend.globals,
+        frontend.globals.globalScope,
+        R"(
         declare foo
     )",
-        "@test", /* captureComments */ false);
+        "@test",
+        /* captureComments */ false
+    );
     freeze(frontend.globals.globalTypes);
 
     REQUIRE(!parseFailResult.success);
     std::optional<Binding> fooTy = tryGetGlobalBinding(frontend.globals, "foo");
     CHECK(!fooTy.has_value());
 
-    LoadDefinitionFileResult checkFailResult = frontend.loadDefinitionFile(frontend.globals, frontend.globals.globalScope, R"(
+    LoadDefinitionFileResult checkFailResult = frontend.loadDefinitionFile(
+        frontend.globals,
+        frontend.globals.globalScope,
+        R"(
         local foo: string = 123
         declare bar: typeof(foo)
     )",
-        "@test", /* captureComments */ false);
+        "@test",
+        /* captureComments */ false
+    );
 
     REQUIRE(!checkFailResult.success);
     std::optional<Binding> barTy = tryGetGlobalBinding(frontend.globals, "bar");
@@ -140,13 +152,18 @@ TEST_CASE_FIXTURE(Fixture, "definition_file_classes")
 TEST_CASE_FIXTURE(Fixture, "class_definitions_cannot_overload_non_function")
 {
     unfreeze(frontend.globals.globalTypes);
-    LoadDefinitionFileResult result = frontend.loadDefinitionFile(frontend.globals, frontend.globals.globalScope, R"(
+    LoadDefinitionFileResult result = frontend.loadDefinitionFile(
+        frontend.globals,
+        frontend.globals.globalScope,
+        R"(
         declare class A
             X: number
             X: string
         end
     )",
-        "@test", /* captureComments */ false);
+        "@test",
+        /* captureComments */ false
+    );
     freeze(frontend.globals.globalTypes);
 
     REQUIRE(!result.success);
@@ -161,13 +178,18 @@ TEST_CASE_FIXTURE(Fixture, "class_definitions_cannot_overload_non_function")
 TEST_CASE_FIXTURE(Fixture, "class_definitions_cannot_extend_non_class")
 {
     unfreeze(frontend.globals.globalTypes);
-    LoadDefinitionFileResult result = frontend.loadDefinitionFile(frontend.globals, frontend.globals.globalScope, R"(
+    LoadDefinitionFileResult result = frontend.loadDefinitionFile(
+        frontend.globals,
+        frontend.globals.globalScope,
+        R"(
         type NotAClass = {}
 
         declare class Foo extends NotAClass
         end
     )",
-        "@test", /* captureComments */ false);
+        "@test",
+        /* captureComments */ false
+    );
     freeze(frontend.globals.globalTypes);
 
     REQUIRE(!result.success);
@@ -182,14 +204,19 @@ TEST_CASE_FIXTURE(Fixture, "class_definitions_cannot_extend_non_class")
 TEST_CASE_FIXTURE(Fixture, "no_cyclic_defined_classes")
 {
     unfreeze(frontend.globals.globalTypes);
-    LoadDefinitionFileResult result = frontend.loadDefinitionFile(frontend.globals, frontend.globals.globalScope, R"(
+    LoadDefinitionFileResult result = frontend.loadDefinitionFile(
+        frontend.globals,
+        frontend.globals.globalScope,
+        R"(
         declare class Foo extends Bar
         end
 
         declare class Bar extends Foo
         end
     )",
-        "@test", /* captureComments */ false);
+        "@test",
+        /* captureComments */ false
+    );
     freeze(frontend.globals.globalTypes);
 
     REQUIRE(!result.success);
@@ -330,6 +357,22 @@ TEST_CASE_FIXTURE(Fixture, "definitions_symbols_are_generated_for_recursively_re
     std::optional<TypeFun> myClassTy = frontend.globals.globalScope->lookupType("MyClass");
     REQUIRE(bool(myClassTy));
     CHECK_EQ(myClassTy->type->documentationSymbol, "@test/globaltype/MyClass");
+
+    ClassType* cls = getMutable<ClassType>(myClassTy->type);
+    REQUIRE(bool(cls));
+    REQUIRE_EQ(cls->props.count("myMethod"), 1);
+
+    const auto& method = cls->props["myMethod"];
+    CHECK_EQ(method.documentationSymbol, "@test/globaltype/MyClass.myMethod");
+
+    FunctionType* function = getMutable<FunctionType>(method.type());
+    REQUIRE(function);
+
+    REQUIRE(function->definition.has_value());
+    CHECK(function->definition->definitionModuleName == "@test");
+    CHECK(function->definition->definitionLocation == Location({2, 12}, {2, 35}));
+    CHECK(!function->definition->varargLocation.has_value());
+    CHECK(function->definition->originalNameLocation == Location({2, 21}, {2, 29}));
 }
 
 TEST_CASE_FIXTURE(Fixture, "documentation_symbols_dont_attach_to_persistent_types")
@@ -402,6 +445,26 @@ TEST_CASE_FIXTURE(Fixture, "class_definition_string_props")
     CHECK_EQ(toString(requireType("y")), "string");
 }
 
+TEST_CASE_FIXTURE(Fixture, "class_definition_malformed_string")
+{
+    unfreeze(frontend.globals.globalTypes);
+    LoadDefinitionFileResult result = frontend.loadDefinitionFile(
+        frontend.globals,
+        frontend.globals.globalScope,
+        R"(
+        declare class Foo
+            ["a\0property"]: string
+        end
+    )",
+        "@test",
+        /* captureComments */ false
+    );
+    freeze(frontend.globals.globalTypes);
+
+    REQUIRE(!result.success);
+    REQUIRE_EQ(result.parseResult.errors.size(), 1);
+    CHECK_EQ(result.parseResult.errors[0].getMessage(), "String literal contains malformed escape sequence or \\0");
+}
 
 TEST_CASE_FIXTURE(Fixture, "class_definition_indexer")
 {
@@ -431,8 +494,8 @@ TEST_CASE_FIXTURE(Fixture, "class_definition_indexer")
 
 TEST_CASE_FIXTURE(Fixture, "class_definitions_reference_other_classes")
 {
-    unfreeze(frontend.globals.globalTypes);
-    LoadDefinitionFileResult result = frontend.loadDefinitionFile(frontend.globals, frontend.globals.globalScope, R"(
+    ScopedFastFlag _{FFlag::LuauNewSolverPrePopulateClasses, true};
+    loadDefinition(R"(
         declare class Channel
             Messages: { Message }
             OnMessage: (message: Message) -> ()
@@ -442,11 +505,19 @@ TEST_CASE_FIXTURE(Fixture, "class_definitions_reference_other_classes")
             Text: string
             Channel: Channel
         end
-    )",
-        "@test", /* captureComments */ false);
-    freeze(frontend.globals.globalTypes);
+    )");
 
-    REQUIRE(result.success);
+    CheckResult result = check(R"(
+        local a: Channel
+        local b = a.Messages[1]
+        local c = b.Channel
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+
+    CHECK_EQ(toString(requireType("a")), "Channel");
+    CHECK_EQ(toString(requireType("b")), "Message");
+    CHECK_EQ(toString(requireType("c")), "Channel");
 }
 
 TEST_CASE_FIXTURE(Fixture, "definition_file_has_source_module_name_set")

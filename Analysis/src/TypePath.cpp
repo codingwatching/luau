@@ -13,7 +13,7 @@
 #include <sstream>
 #include <type_traits>
 
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
+LUAU_FASTFLAG(LuauSolverV2);
 
 // Maximum number of steps to follow when traversing a path. May not always
 // equate to the number of components in a path, depending on the traversal
@@ -29,7 +29,7 @@ namespace TypePath
 Property::Property(std::string name)
     : name(std::move(name))
 {
-    LUAU_ASSERT(!FFlag::DebugLuauDeferredConstraintResolution);
+    LUAU_ASSERT(!FFlag::LuauSolverV2);
 }
 
 Property Property::read(std::string name)
@@ -50,6 +50,11 @@ bool Property::operator==(const Property& other) const
 bool Index::operator==(const Index& other) const
 {
     return index == other.index;
+}
+
+bool Reduction::operator==(const Reduction& other) const
+{
+    return resultType == other.resultType;
 }
 
 Path Path::append(const Path& suffix) const
@@ -124,6 +129,11 @@ size_t PathHash::operator()(const PackField& field) const
     return static_cast<size_t>(field);
 }
 
+size_t PathHash::operator()(const Reduction& reduction) const
+{
+    return std::hash<TypeId>()(reduction.resultType);
+}
+
 size_t PathHash::operator()(const Component& component) const
 {
     return visit(*this, component);
@@ -146,21 +156,21 @@ Path PathBuilder::build()
 
 PathBuilder& PathBuilder::readProp(std::string name)
 {
-    LUAU_ASSERT(FFlag::DebugLuauDeferredConstraintResolution);
+    LUAU_ASSERT(FFlag::LuauSolverV2);
     components.push_back(Property{std::move(name), true});
     return *this;
 }
 
 PathBuilder& PathBuilder::writeProp(std::string name)
 {
-    LUAU_ASSERT(FFlag::DebugLuauDeferredConstraintResolution);
+    LUAU_ASSERT(FFlag::LuauSolverV2);
     components.push_back(Property{std::move(name), false});
     return *this;
 }
 
 PathBuilder& PathBuilder::prop(std::string name)
 {
-    LUAU_ASSERT(!FFlag::DebugLuauDeferredConstraintResolution);
+    LUAU_ASSERT(!FFlag::LuauSolverV2);
     components.push_back(Property{std::move(name)});
     return *this;
 }
@@ -333,7 +343,7 @@ struct TraversalState
         if (prop)
         {
             std::optional<TypeId> maybeType;
-            if (FFlag::DebugLuauDeferredConstraintResolution)
+            if (FFlag::LuauSolverV2)
                 maybeType = property.isRead ? prop->readTy : prop->writeTy;
             else
                 maybeType = prop->type();
@@ -405,6 +415,14 @@ struct TraversalState
 
         switch (field)
         {
+        case TypePath::TypeField::Table:
+            if (auto mt = get<MetatableType>(current))
+            {
+                updateCurrent(mt->table);
+                return true;
+            }
+
+            return false;
         case TypePath::TypeField::Metatable:
             if (auto currentType = get<TypeId>(current))
             {
@@ -432,6 +450,13 @@ struct TraversalState
 
             if (auto tt = get<TableType>(current); tt && tt->indexer)
                 indexer = &(*tt->indexer);
+            else if (auto mt = get<MetatableType>(current))
+            {
+                if (auto mtTab = get<TableType>(follow(mt->table)); mtTab && mtTab->indexer)
+                    indexer = &(*mtTab->indexer);
+                else if (auto mtMt = get<TableType>(follow(mt->metatable)); mtMt && mtMt->indexer)
+                    indexer = &(*mtMt->indexer);
+            }
             // Note: we don't appear to walk the class hierarchy for indexers
             else if (auto ct = get<ClassType>(current); ct && ct->indexer)
                 indexer = &(*ct->indexer);
@@ -463,6 +488,14 @@ struct TraversalState
         }
 
         return false;
+    }
+
+    bool traverse(TypePath::Reduction reduction)
+    {
+        if (checkInvariants())
+            return false;
+        updateCurrent(reduction.resultType);
+        return true;
     }
 
     bool traverse(TypePath::PackField field)
@@ -509,12 +542,13 @@ std::string toString(const TypePath::Path& path, bool prefixDot)
     std::stringstream result;
     bool first = true;
 
-    auto strComponent = [&](auto&& c) {
+    auto strComponent = [&](auto&& c)
+    {
         using T = std::decay_t<decltype(c)>;
         if constexpr (std::is_same_v<T, TypePath::Property>)
         {
             result << '[';
-            if (FFlag::DebugLuauDeferredConstraintResolution)
+            if (FFlag::LuauSolverV2)
             {
                 if (c.isRead)
                     result << "read ";
@@ -535,6 +569,9 @@ std::string toString(const TypePath::Path& path, bool prefixDot)
 
             switch (c)
             {
+            case TypePath::TypeField::Table:
+                result << "table";
+                break;
             case TypePath::TypeField::Metatable:
                 result << "metatable";
                 break;
@@ -577,8 +614,13 @@ std::string toString(const TypePath::Path& path, bool prefixDot)
                 result << "tail";
                 break;
             }
-
             result << "()";
+        }
+        else if constexpr (std::is_same_v<T, TypePath::Reduction>)
+        {
+            // We need to rework the TypePath system to make subtyping failures easier to understand
+            // https://roblox.atlassian.net/browse/CLI-104422
+            result << "~~>";
         }
         else
         {
@@ -596,7 +638,8 @@ std::string toString(const TypePath::Path& path, bool prefixDot)
 
 static bool traverse(TraversalState& state, const Path& path)
 {
-    auto step = [&state](auto&& c) {
+    auto step = [&state](auto&& c)
+    {
         return state.traverse(c);
     };
 

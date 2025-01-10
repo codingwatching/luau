@@ -189,6 +189,7 @@ LUA_API int lua_pushthread(lua_State* L);
 
 LUA_API void lua_pushlightuserdatatagged(lua_State* L, void* p, int tag);
 LUA_API void* lua_newuserdatatagged(lua_State* L, size_t sz, int tag);
+LUA_API void* lua_newuserdatataggedwithmetatable(lua_State* L, size_t sz, int tag); // metatable fetched with lua_getuserdatametatable
 LUA_API void* lua_newuserdatadtor(lua_State* L, size_t sz, void (*dtor)(void*));
 
 LUA_API void* lua_newbuffer(lua_State* L, size_t sz);
@@ -324,6 +325,10 @@ typedef void (*lua_Destructor)(lua_State* L, void* userdata);
 LUA_API void lua_setuserdatadtor(lua_State* L, int tag, lua_Destructor dtor);
 LUA_API lua_Destructor lua_getuserdatadtor(lua_State* L, int tag);
 
+// alternative access for metatables already registered with luaL_newmetatable
+LUA_API void lua_setuserdatametatable(lua_State* L, int tag, int idx);
+LUA_API void lua_getuserdatametatable(lua_State* L, int tag);
+
 LUA_API void lua_setlightuserdataname(lua_State* L, int tag, const char* name);
 LUA_API const char* lua_getlightuserdataname(lua_State* L, int tag);
 
@@ -449,6 +454,8 @@ struct lua_Callbacks
     void (*debugstep)(lua_State* L, lua_Debug* ar);      // gets called after each instruction in single step mode
     void (*debuginterrupt)(lua_State* L, lua_Debug* ar); // gets called when thread execution is interrupted by break in another thread
     void (*debugprotectederror)(lua_State* L);           // gets called when protected call results in an error
+
+    void (*onallocate)(lua_State* L, size_t osize, size_t nsize); // gets called when memory is allocated
 };
 typedef struct lua_Callbacks lua_Callbacks;
 

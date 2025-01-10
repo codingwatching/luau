@@ -9,6 +9,7 @@
 #include "Luau/RecursionCounter.h"
 #include "Luau/StringUtils.h"
 #include "Luau/ToString.h"
+#include "Luau/TypeFunction.h"
 #include "Luau/TypeInfer.h"
 #include "Luau/TypePack.h"
 #include "Luau/VecDeque.h"
@@ -57,9 +58,15 @@ TypeId follow(TypeId t)
 
 TypeId follow(TypeId t, FollowOption followOption)
 {
-    return follow(t, followOption, nullptr, [](const void*, TypeId t) -> TypeId {
-        return t;
-    });
+    return follow(
+        t,
+        followOption,
+        nullptr,
+        [](const void*, TypeId t) -> TypeId
+        {
+            return t;
+        }
+    );
 }
 
 TypeId follow(TypeId t, const void* context, TypeId (*mapper)(const void*, TypeId))
@@ -69,7 +76,8 @@ TypeId follow(TypeId t, const void* context, TypeId (*mapper)(const void*, TypeI
 
 TypeId follow(TypeId t, FollowOption followOption, const void* context, TypeId (*mapper)(const void*, TypeId))
 {
-    auto advance = [followOption, context, mapper](TypeId ty) -> std::optional<TypeId> {
+    auto advance = [followOption, context, mapper](TypeId ty) -> std::optional<TypeId>
+    {
         TypeId mapped = mapper(context, ty);
 
         if (auto btv = get<Unifiable::Bound<TypeId>>(mapped))
@@ -258,7 +266,8 @@ bool isOverloadedFunction(TypeId ty)
     if (!get<IntersectionType>(follow(ty)))
         return false;
 
-    auto isFunction = [](TypeId part) -> bool {
+    auto isFunction = [](TypeId part) -> bool
+    {
         return get<FunctionType>(part);
     };
 
@@ -422,6 +431,9 @@ bool maybeSingleton(TypeId ty)
         for (TypeId part : itv)
             if (maybeSingleton(part)) // will i regret this?
                 return true;
+    if (const TypeFunctionInstanceType* tfit = get<TypeFunctionInstanceType>(ty))
+        if (tfit->function->name == "keyof" || tfit->function->name == "rawkeyof")
+            return true;
     return false;
 }
 
@@ -542,8 +554,32 @@ BlockedType::BlockedType()
 {
 }
 
+Constraint* BlockedType::getOwner() const
+{
+    return owner;
+}
+
+void BlockedType::setOwner(Constraint* newOwner)
+{
+    LUAU_ASSERT(owner == nullptr);
+
+    if (owner != nullptr)
+        return;
+
+    owner = newOwner;
+}
+
+void BlockedType::replaceOwner(Constraint* newOwner)
+{
+    owner = newOwner;
+}
+
 PendingExpansionType::PendingExpansionType(
-    std::optional<AstName> prefix, AstName name, std::vector<TypeId> typeArguments, std::vector<TypePackId> packArguments)
+    std::optional<AstName> prefix,
+    AstName name,
+    std::vector<TypeId> typeArguments,
+    std::vector<TypePackId> packArguments
+)
     : prefix(prefix)
     , name(name)
     , typeArguments(typeArguments)
@@ -572,7 +608,13 @@ FunctionType::FunctionType(TypeLevel level, TypePackId argTypes, TypePackId retT
 }
 
 FunctionType::FunctionType(
-    TypeLevel level, Scope* scope, TypePackId argTypes, TypePackId retTypes, std::optional<FunctionDefinition> defn, bool hasSelf)
+    TypeLevel level,
+    Scope* scope,
+    TypePackId argTypes,
+    TypePackId retTypes,
+    std::optional<FunctionDefinition> defn,
+    bool hasSelf
+)
     : definition(std::move(defn))
     , level(level)
     , scope(scope)
@@ -582,8 +624,14 @@ FunctionType::FunctionType(
 {
 }
 
-FunctionType::FunctionType(std::vector<TypeId> generics, std::vector<TypePackId> genericPacks, TypePackId argTypes, TypePackId retTypes,
-    std::optional<FunctionDefinition> defn, bool hasSelf)
+FunctionType::FunctionType(
+    std::vector<TypeId> generics,
+    std::vector<TypePackId> genericPacks,
+    TypePackId argTypes,
+    TypePackId retTypes,
+    std::optional<FunctionDefinition> defn,
+    bool hasSelf
+)
     : definition(std::move(defn))
     , generics(generics)
     , genericPacks(genericPacks)
@@ -593,8 +641,15 @@ FunctionType::FunctionType(std::vector<TypeId> generics, std::vector<TypePackId>
 {
 }
 
-FunctionType::FunctionType(TypeLevel level, std::vector<TypeId> generics, std::vector<TypePackId> genericPacks, TypePackId argTypes,
-    TypePackId retTypes, std::optional<FunctionDefinition> defn, bool hasSelf)
+FunctionType::FunctionType(
+    TypeLevel level,
+    std::vector<TypeId> generics,
+    std::vector<TypePackId> genericPacks,
+    TypePackId argTypes,
+    TypePackId retTypes,
+    std::optional<FunctionDefinition> defn,
+    bool hasSelf
+)
     : definition(std::move(defn))
     , generics(generics)
     , genericPacks(genericPacks)
@@ -605,8 +660,16 @@ FunctionType::FunctionType(TypeLevel level, std::vector<TypeId> generics, std::v
 {
 }
 
-FunctionType::FunctionType(TypeLevel level, Scope* scope, std::vector<TypeId> generics, std::vector<TypePackId> genericPacks, TypePackId argTypes,
-    TypePackId retTypes, std::optional<FunctionDefinition> defn, bool hasSelf)
+FunctionType::FunctionType(
+    TypeLevel level,
+    Scope* scope,
+    std::vector<TypeId> generics,
+    std::vector<TypePackId> genericPacks,
+    TypePackId argTypes,
+    TypePackId retTypes,
+    std::optional<FunctionDefinition> defn,
+    bool hasSelf
+)
     : definition(std::move(defn))
     , generics(generics)
     , genericPacks(genericPacks)
@@ -620,8 +683,15 @@ FunctionType::FunctionType(TypeLevel level, Scope* scope, std::vector<TypeId> ge
 
 Property::Property() {}
 
-Property::Property(TypeId readTy, bool deprecated, const std::string& deprecatedSuggestion, std::optional<Location> location, const Tags& tags,
-    const std::optional<std::string>& documentationSymbol, std::optional<Location> typeLocation)
+Property::Property(
+    TypeId readTy,
+    bool deprecated,
+    const std::string& deprecatedSuggestion,
+    std::optional<Location> location,
+    const Tags& tags,
+    const std::optional<std::string>& documentationSymbol,
+    std::optional<Location> typeLocation
+)
     : deprecated(deprecated)
     , deprecatedSuggestion(deprecatedSuggestion)
     , location(location)
@@ -682,8 +752,14 @@ TypeId Property::type() const
 void Property::setType(TypeId ty)
 {
     readTy = ty;
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2)
         writeTy = ty;
+}
+
+void Property::makeShared()
+{
+    if (writeTy)
+        writeTy = readTy;
 }
 
 bool Property::isShared() const
@@ -923,9 +999,20 @@ Type& Type::operator=(const Type& rhs)
     return *this;
 }
 
-TypeId makeFunction(TypeArena& arena, std::optional<TypeId> selfType, std::initializer_list<TypeId> generics,
-    std::initializer_list<TypePackId> genericPacks, std::initializer_list<TypeId> paramTypes, std::initializer_list<std::string> paramNames,
-    std::initializer_list<TypeId> retTypes);
+Type Type::clone() const
+{
+    return *this;
+}
+
+TypeId makeFunction(
+    TypeArena& arena,
+    std::optional<TypeId> selfType,
+    std::initializer_list<TypeId> generics,
+    std::initializer_list<TypePackId> genericPacks,
+    std::initializer_list<TypeId> paramTypes,
+    std::initializer_list<std::string> paramNames,
+    std::initializer_list<TypeId> retTypes
+);
 
 TypeId makeStringMetatable(NotNull<BuiltinTypes> builtinTypes); // BuiltinDefinitions.cpp
 
@@ -939,7 +1026,7 @@ BuiltinTypes::BuiltinTypes()
     , threadType(arena->addType(Type{PrimitiveType{PrimitiveType::Thread}, /*persistent*/ true}))
     , bufferType(arena->addType(Type{PrimitiveType{PrimitiveType::Buffer}, /*persistent*/ true}))
     , functionType(arena->addType(Type{PrimitiveType{PrimitiveType::Function}, /*persistent*/ true}))
-    , classType(arena->addType(Type{ClassType{"class", {}, std::nullopt, std::nullopt, {}, {}, {}}, /*persistent*/ true}))
+    , classType(arena->addType(Type{ClassType{"class", {}, std::nullopt, std::nullopt, {}, {}, {}, {}}, /*persistent*/ true}))
     , tableType(arena->addType(Type{PrimitiveType{PrimitiveType::Table}, /*persistent*/ true}))
     , emptyTableType(arena->addType(Type{TableType{TableState::Sealed, TypeLevel{}, nullptr}, /*persistent*/ true}))
     , trueType(arena->addType(Type{SingletonType{BooleanSingleton{true}}, /*persistent*/ true}))
@@ -948,6 +1035,7 @@ BuiltinTypes::BuiltinTypes()
     , unknownType(arena->addType(Type{UnknownType{}, /*persistent*/ true}))
     , neverType(arena->addType(Type{NeverType{}, /*persistent*/ true}))
     , errorType(arena->addType(Type{ErrorType{}, /*persistent*/ true}))
+    , noRefineType(arena->addType(Type{NoRefineType{}, /*persistent*/ true}))
     , falsyType(arena->addType(Type{UnionType{{falseType, nilType}}, /*persistent*/ true}))
     , truthyType(arena->addType(Type{NegationType{falsyType}, /*persistent*/ true}))
     , optionalNumberType(arena->addType(Type{UnionType{{numberType, nilType}}, /*persistent*/ true}))
@@ -957,7 +1045,7 @@ BuiltinTypes::BuiltinTypes()
     , unknownTypePack(arena->addTypePack(TypePackVar{VariadicTypePack{unknownType}, /*persistent*/ true}))
     , neverTypePack(arena->addTypePack(TypePackVar{VariadicTypePack{neverType}, /*persistent*/ true}))
     , uninhabitableTypePack(arena->addTypePack(TypePackVar{TypePack{{neverType}, neverTypePack}, /*persistent*/ true}))
-    , errorTypePack(arena->addTypePack(TypePackVar{Unifiable::Error{}, /*persistent*/ true}))
+    , errorTypePack(arena->addTypePack(TypePackVar{ErrorTypePack{}, /*persistent*/ true}))
 {
     freeze(*arena);
 }
@@ -1051,7 +1139,7 @@ void persist(TypeId ty)
         else if (get<GenericType>(t) || get<AnyType>(t) || get<FreeType>(t) || get<SingletonType>(t) || get<PrimitiveType>(t) || get<NegationType>(t))
         {
         }
-        else if (auto tfit = get<TypeFamilyInstanceType>(t))
+        else if (auto tfit = get<TypeFunctionInstanceType>(t))
         {
             for (auto ty : tfit->typeArguments)
                 queue.push_back(ty);
@@ -1087,7 +1175,7 @@ void persist(TypePackId tp)
     else if (get<GenericTypePack>(tp))
     {
     }
-    else if (auto tfitp = get<TypeFamilyInstanceTypePack>(tp))
+    else if (auto tfitp = get<TypeFunctionInstanceTypePack>(tp))
     {
         for (auto ty : tfitp->typeArguments)
             persist(ty);
@@ -1297,6 +1385,13 @@ bool GenericTypeDefinition::operator==(const GenericTypeDefinition& rhs) const
 bool GenericTypePackDefinition::operator==(const GenericTypePackDefinition& rhs) const
 {
     return tp == rhs.tp && defaultValue == rhs.defaultValue;
+}
+
+template<>
+LUAU_NOINLINE Unifiable::Bound<TypeId>* emplaceType<BoundType>(Type* ty, TypeId& tyArg)
+{
+    LUAU_ASSERT(ty != follow(tyArg));
+    return &ty->ty.emplace<BoundType>(tyArg);
 }
 
 } // namespace Luau

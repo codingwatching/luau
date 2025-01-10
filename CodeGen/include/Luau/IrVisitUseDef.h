@@ -110,12 +110,17 @@ static void visitVmRegDefsUses(T& visitor, IrFunction& function, const IrInst& i
         visitor.useRange(vmRegOp(inst.a), function.intOp(inst.b));
         break;
 
-        // TODO: FASTCALL is more restrictive than INVOKE_FASTCALL; we should either determine the exact semantics, or rework it
     case IrCmd::FASTCALL:
+        visitor.use(inst.c);
+
+        if (int nresults = function.intOp(inst.d); nresults != -1)
+            visitor.defRange(vmRegOp(inst.b), nresults);
+        break;
     case IrCmd::INVOKE_FASTCALL:
-        if (int count = function.intOp(inst.e); count != -1)
+        if (int count = function.intOp(inst.f); count != -1)
         {
-            if (count >= 3)
+            // Only LOP_FASTCALL3 lowering is allowed to have third optional argument
+            if (count >= 3 && inst.e.kind == IrOpKind::Undef)
             {
                 CODEGEN_ASSERT(inst.d.kind == IrOpKind::VmReg && vmRegOp(inst.d) == vmRegOp(inst.c) + 1);
 
@@ -128,6 +133,9 @@ static void visitVmRegDefsUses(T& visitor, IrFunction& function, const IrInst& i
 
                 if (count >= 2)
                     visitor.maybeUse(inst.d); // Argument can also be a VmConst
+
+                if (count >= 3)
+                    visitor.maybeUse(inst.e); // Argument can also be a VmConst
             }
         }
         else
@@ -136,7 +144,7 @@ static void visitVmRegDefsUses(T& visitor, IrFunction& function, const IrInst& i
         }
 
         // Multiple return sequences (count == -1) are defined by ADJUST_STACK_TO_REG
-        if (int count = function.intOp(inst.f); count != -1)
+        if (int count = function.intOp(inst.g); count != -1)
             visitor.defRange(vmRegOp(inst.b), count);
         break;
     case IrCmd::FORGLOOP:
@@ -186,7 +194,8 @@ static void visitVmRegDefsUses(T& visitor, IrFunction& function, const IrInst& i
         visitor.def(inst.b);
         break;
     case IrCmd::FALLBACK_FORGPREP:
-        visitor.use(inst.b);
+        // This instruction doesn't always redefine Rn, Rn+1, Rn+2, so we have to mark it as implicit use
+        visitor.useRange(vmRegOp(inst.b), 3);
 
         visitor.defRange(vmRegOp(inst.b), 3);
         break;
@@ -212,6 +221,7 @@ static void visitVmRegDefsUses(T& visitor, IrFunction& function, const IrInst& i
         CODEGEN_ASSERT(inst.d.kind != IrOpKind::VmReg);
         CODEGEN_ASSERT(inst.e.kind != IrOpKind::VmReg);
         CODEGEN_ASSERT(inst.f.kind != IrOpKind::VmReg);
+        CODEGEN_ASSERT(inst.g.kind != IrOpKind::VmReg);
         break;
     }
 }

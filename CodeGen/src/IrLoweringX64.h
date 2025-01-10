@@ -50,7 +50,8 @@ struct IrLoweringX64
     OperandX64 memRegUintOp(IrOp op);
     OperandX64 memRegTagOp(IrOp op);
     RegisterX64 regOp(IrOp op);
-    OperandX64 bufferAddrOp(IrOp bufferOp, IrOp indexOp);
+    OperandX64 bufferAddrOp(IrOp bufferOp, IrOp indexOp, uint8_t tag);
+    RegisterX64 vecOp(IrOp op, ScopedRegX64& tmp);
 
     IrConst constOp(IrOp op) const;
     uint8_t tagOp(IrOp op) const;
@@ -62,7 +63,6 @@ struct IrLoweringX64
     Label& labelOp(IrOp op) const;
 
     OperandX64 vectorAndMaskOp();
-    OperandX64 vectorOrMaskOp();
 
     struct InterruptHandler
     {

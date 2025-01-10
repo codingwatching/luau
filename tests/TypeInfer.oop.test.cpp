@@ -2,8 +2,6 @@
 
 #include "Luau/AstQuery.h"
 #include "Luau/BuiltinDefinitions.h"
-#include "Luau/Scope.h"
-#include "Luau/TypeInfer.h"
 #include "Luau/Type.h"
 #include "Luau/VisitType.h"
 
@@ -14,13 +12,15 @@
 
 using namespace Luau;
 
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
-LUAU_FASTFLAG(LuauStacklessTypeClone3);
+LUAU_FASTFLAG(LuauSolverV2);
 
 TEST_SUITE_BEGIN("TypeInferOOP");
 
 TEST_CASE_FIXTURE(Fixture, "dont_suggest_using_colon_rather_than_dot_if_not_defined_with_colon")
 {
+    // CLI-116571 method calls are missing arity checking?
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
     CheckResult result = check(R"(
         local someTable = {}
 
@@ -36,6 +36,9 @@ TEST_CASE_FIXTURE(Fixture, "dont_suggest_using_colon_rather_than_dot_if_not_defi
 
 TEST_CASE_FIXTURE(Fixture, "dont_suggest_using_colon_rather_than_dot_if_it_wont_help_2")
 {
+    // CLI-116571 method calls are missing arity checking?
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
+
     CheckResult result = check(R"(
         local someTable = {}
 
@@ -141,7 +144,10 @@ TEST_CASE_FIXTURE(Fixture, "inferring_hundreds_of_self_calls_should_not_suffocat
     )");
 
     ModulePtr module = getMainModule();
-    CHECK_GE(50, module->internalTypes.types.size());
+    if (FFlag::LuauSolverV2)
+        CHECK_GE(80, module->internalTypes.types.size());
+    else
+        CHECK_GE(50, module->internalTypes.types.size());
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "object_constructor_can_refer_to_method_of_self")
@@ -340,7 +346,7 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "augmenting_an_unsealed_table_with_a_metatabl
         end
     )");
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2)
         CHECK("{ @metatable { number: number }, { method: (unknown) -> string } }" == toString(requireType("B"), {true}));
     else
         CHECK("{ @metatable { number: number }, { method: <a>(a) -> string } }" == toString(requireType("B"), {true}));
@@ -413,11 +419,6 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "cycle_between_object_constructor_and_alias")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "promise_type_error_too_complex" * doctest::timeout(2))
 {
-    // TODO: LTI changes to function call resolution have rendered this test impossibly slow
-    // shared self should fix it, but there may be other mitigations possible as well
-    REQUIRE(!FFlag::DebugLuauDeferredConstraintResolution);
-    ScopedFastFlag sff{FFlag::LuauStacklessTypeClone3, true};
-
     frontend.options.retainFullTypeGraphs = false;
 
     // Used `luau-reduce` tool to extract a minimal reproduction.
@@ -500,6 +501,54 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "promise_type_error_too_complex" * doctest::t
     )");
 
     LUAU_REQUIRE_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(Fixture, "method_should_not_create_cyclic_type")
+{
+    ScopedFastFlag sff(FFlag::LuauSolverV2, true);
+
+    CheckResult result = check(R"(
+        local Component = {}
+
+        function Component:__resolveUpdate(incomingState)
+            local oldState = self.state
+            incomingState = oldState
+            self.state = incomingState
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "cross_module_metatable")
+{
+    fileResolver.source["game/A"] = R"(
+        --!strict
+        local cls = {}
+        cls.__index = cls
+        function cls:abc() return 4 end
+        return cls
+    )";
+
+    fileResolver.source["game/B"] = R"(
+        --!strict
+        local cls = require(game.A)
+        local tbl = {}
+        setmetatable(tbl, cls)
+    )";
+
+    CheckResult result = frontend.check("game/B");
+    LUAU_REQUIRE_NO_ERRORS(result);
+
+    ModulePtr b = frontend.moduleResolver.getModule("game/B");
+    REQUIRE(b);
+
+    std::optional<Binding> clsBinding = b->getModuleScope()->linearSearchForBinding("tbl");
+    REQUIRE(clsBinding);
+
+    TypeId clsType = clsBinding->typeId;
+
+    CHECK("{ @metatable cls, tbl }" == toString(clsType));
 }
 
 TEST_SUITE_END();

@@ -4,6 +4,7 @@
 #include "Fixture.h"
 
 #include "Luau/Ast.h"
+#include "Luau/BuiltinDefinitions.h"
 #include "Luau/Common.h"
 #include "Luau/IostreamHelpers.h"
 #include "Luau/ModuleResolver.h"
@@ -13,9 +14,9 @@
 #include "doctest.h"
 #include <iostream>
 
-using namespace Luau;
+LUAU_FASTFLAG(LuauCountSelfCallsNonstrict)
 
-LUAU_FASTFLAG(LuauCheckedFunctionSyntax);
+using namespace Luau;
 
 #define NONSTRICT_REQUIRE_ERR_AT_POS(pos, result, idx) \
     do \
@@ -63,32 +64,61 @@ struct NonStrictTypeCheckerFixture : Fixture
     NonStrictTypeCheckerFixture()
     {
         registerHiddenTypes(&frontend);
+        registerTestTypes();
     }
 
     CheckResult checkNonStrict(const std::string& code)
     {
         ScopedFastFlag flags[] = {
-            {FFlag::LuauCheckedFunctionSyntax, true},
-            {FFlag::DebugLuauDeferredConstraintResolution, true},
+            {FFlag::LuauSolverV2, true},
         };
         LoadDefinitionFileResult res = loadDefinition(definitions);
         LUAU_ASSERT(res.success);
         return check(Mode::Nonstrict, code);
     }
 
+    CheckResult checkNonStrictModule(const std::string& moduleName)
+    {
+        ScopedFastFlag flags[] = {
+            {FFlag::LuauSolverV2, true},
+        };
+        LoadDefinitionFileResult res = loadDefinition(definitions);
+        LUAU_ASSERT(res.success);
+        return frontend.check(moduleName);
+    }
+
     std::string definitions = R"BUILTIN_SRC(
-declare function @checked abs(n: number): number
-declare function @checked lower(s: string): string
+@checked declare function abs(n: number): number
+@checked declare function lower(s: string): string
 declare function cond() : boolean
-declare function @checked contrived(n : Not<number>) : number
+@checked declare function contrived(n : Not<number>) : number
 
 -- interesting types of things that we would like to mark as checked
-declare function @checked onlyNums(...: number) : number
-declare function @checked mixedArgs(x: string, ...: number) : number
-declare function @checked optionalArg(x: string?) : number
+@checked declare function onlyNums(...: number) : number
+@checked declare function mixedArgs(x: string, ...: number) : number
+@checked declare function optionalArg(x: string?) : number
 declare foo: {
     bar: @checked (number) -> number,
 }
+
+@checked declare function optionalArgsAtTheEnd1(x: string, y: number?, z: number?) : number
+@checked declare function optionalArgsAtTheEnd2(x: string, y: number?, z: string) : number
+
+type DateTypeArg = {
+    year: number,
+    month: number,
+    day: number,
+    hour: number?,
+    min: number?,
+    sec: number?,
+    isdst: boolean?,
+}
+
+declare os : {
+    time: @checked (time: DateTypeArg?) -> number
+}
+
+@checked declare function require(target : any) : any
 )BUILTIN_SRC";
 };
 
@@ -472,6 +502,102 @@ abs(3, "hi");
     LUAU_ASSERT(r2);
     CHECK_EQ("abs", r1->functionName);
     CHECK_EQ("foo.bar", r2->functionName);
+}
+
+TEST_CASE_FIXTURE(NonStrictTypeCheckerFixture, "optionals_in_checked_function_can_be_omitted")
+{
+    CheckResult result = checkNonStrict(R"(
+optionalArgsAtTheEnd1("a")
+optionalArgsAtTheEnd1("a", 3)
+optionalArgsAtTheEnd1("a", nil, 3)
+)");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(NonStrictTypeCheckerFixture, "optionals_in_checked_function_in_middle_cannot_be_omitted")
+{
+    CheckResult result = checkNonStrict(R"(
+optionalArgsAtTheEnd2("a", "a") -- error
+optionalArgsAtTheEnd2("a", nil, "b")
+optionalArgsAtTheEnd2("a", 3, "b")
+optionalArgsAtTheEnd2("a", "b", "c") -- error
+)");
+    LUAU_REQUIRE_ERROR_COUNT(3, result);
+    NONSTRICT_REQUIRE_CHECKED_ERR(Position(1, 27), "optionalArgsAtTheEnd2", result);
+    NONSTRICT_REQUIRE_CHECKED_ERR(Position(4, 27), "optionalArgsAtTheEnd2", result);
+    auto r1 = get<CheckedFunctionIncorrectArgs>(result.errors[2]);
+    LUAU_ASSERT(r1);
+    CHECK_EQ(3, r1->expected);
+    CHECK_EQ(2, r1->actual);
+}
+
+TEST_CASE_FIXTURE(NonStrictTypeCheckerFixture, "non_testable_type_throws_ice")
+{
+    CHECK_THROWS_AS(
+        checkNonStrict(R"(
+os.time({year = 0, month = 0, day = 0, min = 0, isdst = nil})
+)"),
+        Luau::InternalCompilerError
+    );
+}
+
+TEST_CASE_FIXTURE(NonStrictTypeCheckerFixture, "non_strict_shouldnt_warn_on_require_module")
+{
+    fileResolver.source["Modules/A"] = R"(
+--!strict
+type t = {x : number}
+local e : t = {x = 3}
+return e
+)";
+    fileResolver.sourceTypes["Modules/A"] = SourceCode::Module;
+
+    fileResolver.source["Modules/B"] = R"(
+--!nonstrict
+local E = require(script.Parent.A)
+)";
+
+    CheckResult result = checkNonStrictModule("Modules/B");
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(NonStrictTypeCheckerFixture, "nonstrict_shouldnt_warn_on_valid_buffer_use")
+{
+    loadDefinition(R"(
+declare buffer: {
+    create: @checked (size: number) -> buffer,
+    readi8: @checked (b: buffer, offset: number) -> number,
+    writef64: @checked (b: buffer, offset: number, value: number) -> (),
+}
+)");
+
+    CheckResult result = checkNonStrict(R"(
+local b = buffer.create(100)
+buffer.writef64(b, 0, 5)
+buffer.readi8(b, 0)
+)");
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(NonStrictTypeCheckerFixture, "nonstrict_method_calls")
+{
+    ScopedFastFlag sff{FFlag::LuauCountSelfCallsNonstrict, true};
+
+    Luau::unfreeze(frontend.globals.globalTypes);
+    Luau::unfreeze(frontend.globalsForAutocomplete.globalTypes);
+
+    registerBuiltinGlobals(frontend, frontend.globals);
+    registerTestTypes();
+
+    Luau::freeze(frontend.globals.globalTypes);
+    Luau::freeze(frontend.globalsForAutocomplete.globalTypes);
+
+    CheckResult result = checkNonStrict(R"(
+        local test = "test"
+        test:lower()
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
 }
 
 TEST_SUITE_END();

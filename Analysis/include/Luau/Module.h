@@ -8,16 +8,21 @@
 #include "Luau/ParseResult.h"
 #include "Luau/Scope.h"
 #include "Luau/TypeArena.h"
+#include "Luau/AnyTypeSummary.h"
+#include "Luau/DataFlowGraph.h"
 
 #include <memory>
 #include <vector>
 #include <unordered_map>
 #include <optional>
 
+LUAU_FASTFLAG(LuauIncrementalAutocompleteCommentDetection)
+
 namespace Luau
 {
 
 struct Module;
+struct AnyTypeSummary;
 
 using ScopePtr = std::shared_ptr<struct Scope>;
 using ModulePtr = std::shared_ptr<Module>;
@@ -52,6 +57,7 @@ struct SourceModule
     }
 };
 
+bool isWithinComment(const std::vector<Comment>& commentLocations, Position pos);
 bool isWithinComment(const SourceModule& sourceModule, Position pos);
 bool isWithinComment(const ParseResult& result, Position pos);
 
@@ -65,11 +71,18 @@ struct Module
 {
     ~Module();
 
+    // TODO: Clip this when we clip FFlagLuauSolverV2
+    bool checkedInNewSolver = false;
+
     ModuleName name;
     std::string humanReadableName;
 
     TypeArena interfaceTypes;
     TypeArena internalTypes;
+
+    // Summary of Ast Nodes that either contain
+    // user annotated anys or typechecker inferred anys
+    AnyTypeSummary ats{};
 
     // Scopes and AST types refer to parse data, so we need to keep that alive
     std::shared_ptr<Allocator> allocator;
@@ -101,6 +114,12 @@ struct Module
 
     DenseHashMap<const AstType*, TypeId> astResolvedTypes{nullptr};
     DenseHashMap<const AstTypePack*, TypePackId> astResolvedTypePacks{nullptr};
+
+    // The computed result type of a compound assignment. (eg foo += 1)
+    //
+    // Type checking uses this to check that the result of such an operation is
+    // actually compatible with the left-side operand.
+    DenseHashMap<const AstStat*, TypeId> astCompoundAssignResultTypes{nullptr};
 
     DenseHashMap<TypeId, std::vector<std::pair<Location, TypeId>>> upperBoundContributors{nullptr};
 

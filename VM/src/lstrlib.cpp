@@ -8,8 +8,6 @@
 #include <string.h>
 #include <stdio.h>
 
-LUAU_DYNAMIC_FASTFLAGVARIABLE(LuauInterruptablePatternMatch, false)
-
 // macro to `unsign' a character
 #define uchar(c) ((unsigned char)(c))
 
@@ -432,18 +430,15 @@ static const char* match(MatchState* ms, const char* s, const char* p)
     if (ms->matchdepth-- == 0)
         luaL_error(ms->L, "pattern too complex");
 
-    if (DFFlag::LuauInterruptablePatternMatch)
-    {
-        lua_State* L = ms->L;
-        void (*interrupt)(lua_State*, int) = L->global->cb.interrupt;
+    lua_State* L = ms->L;
+    void (*interrupt)(lua_State*, int) = L->global->cb.interrupt;
 
-        if (LUAU_UNLIKELY(!!interrupt))
-        {
-            // this interrupt is not yieldable
-            L->nCcalls++;
-            interrupt(L, -1);
-            L->nCcalls--;
-        }
+    if (LUAU_UNLIKELY(!!interrupt))
+    {
+        // this interrupt is not yieldable
+        L->nCcalls++;
+        interrupt(L, -1);
+        L->nCcalls--;
     }
 
 init: // using goto's to optimize tail recursion
@@ -557,9 +552,9 @@ init: // using goto's to optimize tail recursion
                     }
                     break;
                 }
-                case '+': // 1 or more repetitions
-                    s++;  // 1 match already done
-                          // go through
+                case '+':             // 1 or more repetitions
+                    s++;              // 1 match already done
+                    LUAU_FALLTHROUGH; // go through
                 case '*': // 0 or more repetitions
                     s = max_expand(ms, s, p, ep);
                     break;
@@ -1485,7 +1480,8 @@ static int str_pack(lua_State* L)
             break;
         }
         case Kpadding:
-            luaL_addchar(&b, LUAL_PACKPADBYTE); // FALLTHROUGH
+            luaL_addchar(&b, LUAL_PACKPADBYTE);
+            LUAU_FALLTHROUGH;
         case Kpaddalign:
         case Knop:
             arg--; // undo increment

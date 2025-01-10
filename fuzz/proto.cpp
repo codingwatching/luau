@@ -56,7 +56,7 @@ LUAU_FASTINT(LuauTypeInferIterationLimit)
 LUAU_FASTINT(LuauTarjanChildLimit)
 LUAU_FASTFLAG(DebugLuauFreezeArena)
 LUAU_FASTFLAG(DebugLuauAbortingChecks)
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution)
+LUAU_FASTFLAG(LuauSolverV2)
 
 std::chrono::milliseconds kInterruptTimeout(10);
 std::chrono::time_point<std::chrono::system_clock> interruptDeadline;
@@ -124,7 +124,7 @@ int registerTypes(Luau::Frontend& frontend, Luau::GlobalTypes& globals, bool for
     // Vector3 stub
     TypeId vector3MetaType = arena.addType(TableType{});
 
-    TypeId vector3InstanceType = arena.addType(ClassType{"Vector3", {}, nullopt, vector3MetaType, {}, {}, "Test"});
+    TypeId vector3InstanceType = arena.addType(ClassType{"Vector3", {}, nullopt, vector3MetaType, {}, {}, "Test", {}});
     getMutable<ClassType>(vector3InstanceType)->props = {
         {"X", {builtinTypes.numberType}},
         {"Y", {builtinTypes.numberType}},
@@ -138,7 +138,7 @@ int registerTypes(Luau::Frontend& frontend, Luau::GlobalTypes& globals, bool for
     globals.globalScope->exportedTypeBindings["Vector3"] = TypeFun{{}, vector3InstanceType};
 
     // Instance stub
-    TypeId instanceType = arena.addType(ClassType{"Instance", {}, nullopt, nullopt, {}, {}, "Test"});
+    TypeId instanceType = arena.addType(ClassType{"Instance", {}, nullopt, nullopt, {}, {}, "Test", {}});
     getMutable<ClassType>(instanceType)->props = {
         {"Name", {builtinTypes.stringType}},
     };
@@ -146,7 +146,7 @@ int registerTypes(Luau::Frontend& frontend, Luau::GlobalTypes& globals, bool for
     globals.globalScope->exportedTypeBindings["Instance"] = TypeFun{{}, instanceType};
 
     // Part stub
-    TypeId partType = arena.addType(ClassType{"Part", {}, instanceType, nullopt, {}, {}, "Test"});
+    TypeId partType = arena.addType(ClassType{"Part", {}, instanceType, nullopt, {}, {}, "Test", {}});
     getMutable<ClassType>(partType)->props = {
         {"Position", {vector3InstanceType}},
     };
@@ -167,7 +167,8 @@ static void setupFrontend(Luau::Frontend& frontend)
     registerTypes(frontend, frontend.globalsForAutocomplete, true);
     Luau::freeze(frontend.globalsForAutocomplete.globalTypes);
 
-    frontend.iceHandler.onInternalError = [](const char* error) {
+    frontend.iceHandler.onInternalError = [](const char* error)
+    {
         printf("ICE: %s\n", error);
         LUAU_ASSERT(!"ICE");
     };
@@ -246,7 +247,7 @@ DEFINE_PROTO_FUZZER(const luau::ModuleSet& message)
 
     FFlag::DebugLuauFreezeArena.value = true;
     FFlag::DebugLuauAbortingChecks.value = true;
-    FFlag::DebugLuauDeferredConstraintResolution.value = kFuzzUseNewSolver;
+    FFlag::LuauSolverV2.value = kFuzzUseNewSolver;
 
     std::vector<std::string> sources = protoprint(message, kFuzzTypes);
 
@@ -379,7 +380,7 @@ DEFINE_PROTO_FUZZER(const luau::ModuleSet& message)
         if (luau_load(globalState, "=fuzz", bytecode.data(), bytecode.size(), 0) == 0)
         {
             Luau::CodeGen::AssemblyOptions options;
-            options.flags = Luau::CodeGen::CodeGen_ColdFunctions;
+            options.compilationOptions.flags = Luau::CodeGen::CodeGen_ColdFunctions;
             options.outputBinary = true;
             options.target = kFuzzCodegenTarget;
             Luau::CodeGen::getAssembly(globalState, -1, options);
@@ -394,7 +395,8 @@ DEFINE_PROTO_FUZZER(const luau::ModuleSet& message)
     {
         static lua_State* globalState = createGlobalState();
 
-        auto runCode = [](const std::string& bytecode, bool useCodegen) {
+        auto runCode = [](const std::string& bytecode, bool useCodegen)
+        {
             lua_State* L = lua_newthread(globalState);
             luaL_sandboxthread(L);
 

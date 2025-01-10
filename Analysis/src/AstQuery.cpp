@@ -11,7 +11,9 @@
 
 #include <algorithm>
 
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
+LUAU_FASTFLAG(LuauSolverV2)
+
+LUAU_FASTFLAGVARIABLE(LuauDocumentationAtPosition)
 
 namespace Luau
 {
@@ -176,60 +178,52 @@ struct FindNode : public AstVisitor
     }
 };
 
-struct FindFullAncestry final : public AstVisitor
-{
-    std::vector<AstNode*> nodes;
-    Position pos;
-    Position documentEnd;
-    bool includeTypes = false;
-
-    explicit FindFullAncestry(Position pos, Position documentEnd, bool includeTypes = false)
-        : pos(pos)
-        , documentEnd(documentEnd)
-        , includeTypes(includeTypes)
-    {
-    }
-
-    bool visit(AstType* type) override
-    {
-        if (includeTypes)
-            return visit(static_cast<AstNode*>(type));
-        else
-            return false;
-    }
-
-    bool visit(AstStatFunction* node) override
-    {
-        visit(static_cast<AstNode*>(node));
-        if (node->name->location.contains(pos))
-            node->name->visit(this);
-        else if (node->func->location.contains(pos))
-            node->func->visit(this);
-        return false;
-    }
-
-    bool visit(AstNode* node) override
-    {
-        if (node->location.contains(pos))
-        {
-            nodes.push_back(node);
-            return true;
-        }
-
-        // Edge case: If we ask for the node at the position that is the very end of the document
-        // return the innermost AST element that ends at that position.
-
-        if (node->location.end == documentEnd && pos >= documentEnd)
-        {
-            nodes.push_back(node);
-            return true;
-        }
-
-        return false;
-    }
-};
-
 } // namespace
+
+FindFullAncestry::FindFullAncestry(Position pos, Position documentEnd, bool includeTypes)
+    : pos(pos)
+    , documentEnd(documentEnd)
+    , includeTypes(includeTypes)
+{
+}
+
+bool FindFullAncestry::visit(AstType* type)
+{
+    if (includeTypes)
+        return visit(static_cast<AstNode*>(type));
+    else
+        return false;
+}
+
+bool FindFullAncestry::visit(AstStatFunction* node)
+{
+    visit(static_cast<AstNode*>(node));
+    if (node->name->location.contains(pos))
+        node->name->visit(this);
+    else if (node->func->location.contains(pos))
+        node->func->visit(this);
+    return false;
+}
+
+bool FindFullAncestry::visit(AstNode* node)
+{
+    if (node->location.contains(pos))
+    {
+        nodes.push_back(node);
+        return true;
+    }
+
+    // Edge case: If we ask for the node at the position that is the very end of the document
+    // return the innermost AST element that ends at that position.
+
+    if (node->location.end == documentEnd && pos >= documentEnd)
+    {
+        nodes.push_back(node);
+        return true;
+    }
+
+    return false;
+}
 
 std::vector<AstNode*> findAncestryAtPositionForAutocomplete(const SourceModule& source, Position pos)
 {
@@ -332,10 +326,20 @@ std::optional<TypeId> findExpectedTypeAtPosition(const Module& module, const Sou
 
 static std::optional<AstStatLocal*> findBindingLocalStatement(const SourceModule& source, const Binding& binding)
 {
+    // Bindings coming from global sources (e.g., definition files) have a zero position.
+    // They cannot be defined from a local statement
+    if (binding.location == Location{{0, 0}, {0, 0}})
+        return std::nullopt;
+
     std::vector<AstNode*> nodes = findAstAncestryOfPosition(source, binding.location.begin);
-    auto iter = std::find_if(nodes.rbegin(), nodes.rend(), [](AstNode* node) {
-        return node->is<AstStatLocal>();
-    });
+    auto iter = std::find_if(
+        nodes.rbegin(),
+        nodes.rend(),
+        [](AstNode* node)
+        {
+            return node->is<AstStatLocal>();
+        }
+    );
     return iter != nodes.rend() ? std::make_optional((*iter)->as<AstStatLocal>()) : std::nullopt;
 }
 
@@ -474,7 +478,11 @@ ExprOrLocal findExprOrLocalAtPosition(const SourceModule& source, Position pos)
 }
 
 static std::optional<DocumentationSymbol> checkOverloadedDocumentationSymbol(
-    const Module& module, const TypeId ty, const AstExpr* parentExpr, const std::optional<DocumentationSymbol> documentationSymbol)
+    const Module& module,
+    const TypeId ty,
+    const AstExpr* parentExpr,
+    const std::optional<DocumentationSymbol> documentationSymbol
+)
 {
     if (!documentationSymbol)
         return std::nullopt;
@@ -503,6 +511,38 @@ static std::optional<DocumentationSymbol> checkOverloadedDocumentationSymbol(
     return documentationSymbol;
 }
 
+static std::optional<DocumentationSymbol> getMetatableDocumentation(
+    const Module& module,
+    AstExpr* parentExpr,
+    const TableType* mtable,
+    const AstName& index
+)
+{
+    LUAU_ASSERT(FFlag::LuauDocumentationAtPosition);
+    auto indexIt = mtable->props.find("__index");
+    if (indexIt == mtable->props.end())
+        return std::nullopt;
+
+    TypeId followed = follow(indexIt->second.type());
+    const TableType* ttv = get<TableType>(followed);
+    if (!ttv)
+        return std::nullopt;
+
+    auto propIt = ttv->props.find(index.value);
+    if (propIt == ttv->props.end())
+        return std::nullopt;
+
+    if (FFlag::LuauSolverV2)
+    {
+        if (auto ty = propIt->second.readTy)
+            return checkOverloadedDocumentationSymbol(module, *ty, parentExpr, propIt->second.documentationSymbol);
+    }
+    else
+        return checkOverloadedDocumentationSymbol(module, propIt->second.type(), parentExpr, propIt->second.documentationSymbol);
+
+    return std::nullopt;
+}
+
 std::optional<DocumentationSymbol> getDocumentationSymbolAtPosition(const SourceModule& source, const Module& module, Position position)
 {
     std::vector<AstNode*> ancestry = findAstAncestryOfPosition(source, position);
@@ -524,7 +564,7 @@ std::optional<DocumentationSymbol> getDocumentationSymbolAtPosition(const Source
                 {
                     if (auto propIt = ttv->props.find(indexName->index.value); propIt != ttv->props.end())
                     {
-                        if (FFlag::DebugLuauDeferredConstraintResolution)
+                        if (FFlag::LuauSolverV2)
                         {
                             if (auto ty = propIt->second.readTy)
                                 return checkOverloadedDocumentationSymbol(module, *ty, parentExpr, propIt->second.documentationSymbol);
@@ -535,15 +575,50 @@ std::optional<DocumentationSymbol> getDocumentationSymbolAtPosition(const Source
                 }
                 else if (const ClassType* ctv = get<ClassType>(parentTy))
                 {
-                    if (auto propIt = ctv->props.find(indexName->index.value); propIt != ctv->props.end())
+                    if (FFlag::LuauDocumentationAtPosition)
                     {
-                        if (FFlag::DebugLuauDeferredConstraintResolution)
+                        while (ctv)
                         {
-                            if (auto ty = propIt->second.readTy)
-                                return checkOverloadedDocumentationSymbol(module, *ty, parentExpr, propIt->second.documentationSymbol);
+                            if (auto propIt = ctv->props.find(indexName->index.value); propIt != ctv->props.end())
+                            {
+                                if (FFlag::LuauSolverV2)
+                                {
+                                    if (auto ty = propIt->second.readTy)
+                                        return checkOverloadedDocumentationSymbol(module, *ty, parentExpr, propIt->second.documentationSymbol);
+                                }
+                                else
+                                    return checkOverloadedDocumentationSymbol(
+                                        module, propIt->second.type(), parentExpr, propIt->second.documentationSymbol
+                                    );
+                            }
+                            ctv = ctv->parent ? Luau::get<Luau::ClassType>(*ctv->parent) : nullptr;
                         }
-                        else
-                            return checkOverloadedDocumentationSymbol(module, propIt->second.type(), parentExpr, propIt->second.documentationSymbol);
+                    }
+                    else
+                    {
+                        if (auto propIt = ctv->props.find(indexName->index.value); propIt != ctv->props.end())
+                        {
+                            if (FFlag::LuauSolverV2)
+                            {
+                                if (auto ty = propIt->second.readTy)
+                                    return checkOverloadedDocumentationSymbol(module, *ty, parentExpr, propIt->second.documentationSymbol);
+                            }
+                            else
+                                return checkOverloadedDocumentationSymbol(
+                                    module, propIt->second.type(), parentExpr, propIt->second.documentationSymbol
+                                );
+                        }
+                    }
+                }
+                else if (FFlag::LuauDocumentationAtPosition)
+                {
+                    if (const PrimitiveType* ptv = get<PrimitiveType>(parentTy); ptv && ptv->metatable)
+                    {
+                        if (auto mtable = get<TableType>(*ptv->metatable))
+                        {
+                            if (std::optional<std::string> docSymbol = getMetatableDocumentation(module, parentExpr, mtable, indexName->index))
+                                return docSymbol;
+                        }
                     }
                 }
             }

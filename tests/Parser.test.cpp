@@ -3,6 +3,7 @@
 
 #include "AstQueryDsl.h"
 #include "Fixture.h"
+#include "Luau/Common.h"
 #include "ScopedFlags.h"
 
 #include "doctest.h"
@@ -11,13 +12,13 @@
 
 using namespace Luau;
 
-LUAU_FASTFLAG(LuauCheckedFunctionSyntax);
-LUAU_FASTFLAG(LuauLexerLookaheadRemembersBraceType);
-LUAU_FASTINT(LuauRecursionLimit);
-LUAU_FASTINT(LuauTypeLengthLimit);
-LUAU_FASTINT(LuauParseErrorLimit);
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
-LUAU_FASTFLAG(LuauReadWritePropertySyntax);
+LUAU_FASTINT(LuauRecursionLimit)
+LUAU_FASTINT(LuauTypeLengthLimit)
+LUAU_FASTINT(LuauParseErrorLimit)
+LUAU_FASTFLAG(LuauSolverV2)
+LUAU_FASTFLAG(LuauAllowComplexTypesInGenericParams)
+LUAU_FASTFLAG(LuauErrorRecoveryForTableTypes)
+LUAU_FASTFLAG(LuauErrorRecoveryForClassNames)
 
 namespace
 {
@@ -37,24 +38,6 @@ struct Counter
 
 int Counter::instanceCount = 0;
 
-// TODO: delete this and replace all other use of this function with matchParseError
-std::string getParseError(const std::string& code)
-{
-    Fixture f;
-
-    try
-    {
-        f.parse(code);
-    }
-    catch (const Luau::ParseErrors& e)
-    {
-        // in general, tests check only the first error
-        return e.getErrors().front().getMessage();
-    }
-
-    throw std::runtime_error("Expected a parse error in '" + code + "'");
-}
-
 } // namespace
 
 TEST_SUITE_BEGIN("AllocatorTests");
@@ -62,7 +45,8 @@ TEST_SUITE_BEGIN("AllocatorTests");
 TEST_CASE("allocator_can_be_moved")
 {
     Counter* c = nullptr;
-    auto inner = [&]() {
+    auto inner = [&]()
+    {
         Luau::Allocator allocator;
         c = allocator.alloc<Counter>();
         Luau::Allocator moved{std::move(allocator)};
@@ -462,46 +446,62 @@ TEST_CASE_FIXTURE(Fixture, "type_alias_span_is_correct")
 
 TEST_CASE_FIXTURE(Fixture, "parse_error_messages")
 {
-    CHECK_EQ(getParseError(R"(
-            local a: (number, number) -> (string
-        )"),
-        "Expected ')' (to close '(' at line 2), got <eof>");
+    matchParseError(
+        R"(
+        local a: (number, number) -> (string
+    )",
+        "Expected ')' (to close '(' at line 2), got <eof>"
+    );
 
-    CHECK_EQ(getParseError(R"(
-            local a: (number, number) -> (
-                string
-        )"),
-        "Expected ')' (to close '(' at line 2), got <eof>");
+    matchParseError(
+        R"(
+        local a: (number, number) -> (
+            string
+    )",
+        "Expected ')' (to close '(' at line 2), got <eof>"
+    );
 
-    CHECK_EQ(getParseError(R"(
-            local a: (number, number)
-        )"),
-        "Expected '->' when parsing function type, got <eof>");
+    matchParseError(
+        R"(
+        local a: (number, number)
+    )",
+        "Expected '->' when parsing function type, got <eof>"
+    );
 
-    CHECK_EQ(getParseError(R"(
-            local a: (number, number
-        )"),
-        "Expected ')' (to close '(' at line 2), got <eof>");
+    matchParseError(
+        R"(
+        local a: (number, number
+    )",
+        "Expected ')' (to close '(' at line 2), got <eof>"
+    );
 
-    CHECK_EQ(getParseError(R"(
-            local a: {foo: string,
-        )"),
-        "Expected identifier when parsing table field, got <eof>");
+    matchParseError(
+        R"(
+        local a: {foo: string,
+    )",
+        "Expected identifier when parsing table field, got <eof>"
+    );
 
-    CHECK_EQ(getParseError(R"(
-            local a: {foo: string
-        )"),
-        "Expected '}' (to close '{' at line 2), got <eof>");
+    matchParseError(
+        R"(
+        local a: {foo: string
+    )",
+        "Expected '}' (to close '{' at line 2), got <eof>"
+    );
 
-    CHECK_EQ(getParseError(R"(
-            local a: { [string]: number, [number]: string }
-        )"),
-        "Cannot have more than one table indexer");
+    matchParseError(
+        R"(
+        local a: { [string]: number, [number]: string }
+    )",
+        "Cannot have more than one table indexer"
+    );
 
-    CHECK_EQ(getParseError(R"(
-            type T = <a>foo
-        )"),
-        "Expected '(' when parsing function parameters, got 'foo'");
+    matchParseError(
+        R"(
+        type T = <a>foo
+    )",
+        "Expected '(' when parsing function parameters, got 'foo'"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "mixed_intersection_and_union_not_allowed")
@@ -529,10 +529,10 @@ TEST_CASE_FIXTURE(Fixture, "cannot_write_multiple_values_in_type_groups")
 
 TEST_CASE_FIXTURE(Fixture, "type_alias_error_messages")
 {
-    CHECK_EQ(getParseError("type 5 = number"), "Expected identifier when parsing type name, got '5'");
-    CHECK_EQ(getParseError("type A"), "Expected '=' when parsing type alias, got <eof>");
-    CHECK_EQ(getParseError("type A<"), "Expected identifier, got <eof>");
-    CHECK_EQ(getParseError("type A<B"), "Expected '>' (to close '<' at column 7), got <eof>");
+    matchParseError("type 5 = number", "Expected identifier when parsing type name, got '5'");
+    matchParseError("type A", "Expected '=' when parsing type alias, got <eof>");
+    matchParseError("type A<", "Expected identifier, got <eof>");
+    matchParseError("type A<B", "Expected '>' (to close '<' at column 7), got <eof>");
 }
 
 TEST_CASE_FIXTURE(Fixture, "type_assertion_expression")
@@ -636,10 +636,12 @@ TEST_CASE_FIXTURE(Fixture, "vertical_space")
 
 TEST_CASE_FIXTURE(Fixture, "parse_error_type_name")
 {
-    CHECK_EQ(getParseError(R"(
-            local a: Foo.=
-        )"),
-        "Expected identifier when parsing field name, got '='");
+    matchParseError(
+        R"(
+        local a: Foo.=
+    )",
+        "Expected identifier when parsing field name, got '='"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_numbers_decimal")
@@ -685,26 +687,28 @@ TEST_CASE_FIXTURE(Fixture, "parse_numbers_binary")
 
 TEST_CASE_FIXTURE(Fixture, "parse_numbers_error")
 {
-    CHECK_EQ(getParseError("return 0b123"), "Malformed number");
-    CHECK_EQ(getParseError("return 123x"), "Malformed number");
-    CHECK_EQ(getParseError("return 0xg"), "Malformed number");
-    CHECK_EQ(getParseError("return 0x0x123"), "Malformed number");
-    CHECK_EQ(getParseError("return 0xffffffffffffffffffffllllllg"), "Malformed number");
-    CHECK_EQ(getParseError("return 0x0xffffffffffffffffffffffffffff"), "Malformed number");
+    matchParseError("return 0b123", "Malformed number");
+    matchParseError("return 123x", "Malformed number");
+    matchParseError("return 0xg", "Malformed number");
+    matchParseError("return 0x0x123", "Malformed number");
+    matchParseError("return 0xffffffffffffffffffffllllllg", "Malformed number");
+    matchParseError("return 0x0xffffffffffffffffffffffffffff", "Malformed number");
 }
 
 TEST_CASE_FIXTURE(Fixture, "break_return_not_last_error")
 {
-    CHECK_EQ(getParseError("return 0 print(5)"), "Expected <eof>, got 'print'");
-    CHECK_EQ(getParseError("while true do break print(5) end"), "Expected 'end' (to close 'do' at column 12), got 'print'");
+    matchParseError("return 0 print(5)", "Expected <eof>, got 'print'");
+    matchParseError("while true do break print(5) end", "Expected 'end' (to close 'do' at column 12), got 'print'");
 }
 
 TEST_CASE_FIXTURE(Fixture, "error_on_unicode")
 {
-    CHECK_EQ(getParseError(R"(
+    matchParseError(
+        R"(
             local ☃ = 10
-        )"),
-        "Expected identifier when parsing variable name, got Unicode character U+2603");
+        )",
+        "Expected identifier when parsing variable name, got Unicode character U+2603"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "allow_unicode_in_string")
@@ -715,18 +719,20 @@ TEST_CASE_FIXTURE(Fixture, "allow_unicode_in_string")
 
 TEST_CASE_FIXTURE(Fixture, "error_on_confusable")
 {
-    CHECK_EQ(getParseError(R"(
-            local pi = 3․13
-        )"),
-        "Expected identifier when parsing expression, got Unicode character U+2024 (did you mean '.'?)");
+    matchParseError(
+        R"(
+        local pi = 3․13
+    )",
+        "Expected identifier when parsing expression, got Unicode character U+2024 (did you mean '.'?)"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "error_on_non_utf8_sequence")
 {
     const char* expected = "Expected identifier when parsing expression, got invalid UTF-8 sequence";
 
-    CHECK_EQ(getParseError("local pi = \xFF!"), expected);
-    CHECK_EQ(getParseError("local pi = \xE2!"), expected);
+    matchParseError("local pi = \xFF!", expected);
+    matchParseError("local pi = \xE2!", expected);
 }
 
 TEST_CASE_FIXTURE(Fixture, "lex_broken_unicode")
@@ -794,7 +800,7 @@ TEST_CASE_FIXTURE(Fixture, "parse_continue")
 
 TEST_CASE_FIXTURE(Fixture, "continue_not_last_error")
 {
-    CHECK_EQ(getParseError("while true do continue print(5) end"), "Expected 'end' (to close 'do' at column 12), got 'print'");
+    matchParseError("while true do continue print(5) end", "Expected 'end' (to close 'do' at column 12), got 'print'");
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_export_type")
@@ -837,7 +843,7 @@ TEST_CASE_FIXTURE(Fixture, "export_is_an_identifier_only_when_followed_by_type")
 
 TEST_CASE_FIXTURE(Fixture, "incomplete_statement_error")
 {
-    CHECK_EQ(getParseError("fiddlesticks"), "Incomplete statement: expected assignment or a function call");
+    matchParseError("fiddlesticks", "Incomplete statement: expected assignment or a function call");
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_compound_assignment")
@@ -929,7 +935,8 @@ TEST_CASE_FIXTURE(Fixture, "parse_interpolated_string_double_brace_mid")
 
 TEST_CASE_FIXTURE(Fixture, "parse_interpolated_string_without_end_brace")
 {
-    auto columnOfEndBraceError = [this](const char* code) {
+    auto columnOfEndBraceError = [this](const char* code)
+    {
         try
         {
             parse(code);
@@ -1106,8 +1113,9 @@ end
     }
     catch (const ParseErrors& e)
     {
-        CHECK_EQ("Expected 'end' (to close 'function' at line 2), got <eof>; did you forget to close 'else' at line 8?",
-            e.getErrors().front().getMessage());
+        CHECK_EQ(
+            "Expected 'end' (to close 'function' at line 2), got <eof>; did you forget to close 'else' at line 8?", e.getErrors().front().getMessage()
+        );
     }
 }
 
@@ -1135,8 +1143,9 @@ end
     }
     catch (const ParseErrors& e)
     {
-        CHECK_EQ("Expected 'end' (to close 'function' at line 2), got <eof>; did you forget to close 'else' at line 3?",
-            e.getErrors().front().getMessage());
+        CHECK_EQ(
+            "Expected 'end' (to close 'function' at line 2), got <eof>; did you forget to close 'else' at line 3?", e.getErrors().front().getMessage()
+        );
     }
 }
 
@@ -1156,16 +1165,16 @@ until false
     }
     catch (const ParseErrors& e)
     {
-        CHECK_EQ("Expected 'until' (to close 'repeat' at line 2), got <eof>; did you forget to close 'repeat' at line 4?",
-            e.getErrors().front().getMessage());
+        CHECK_EQ(
+            "Expected 'until' (to close 'repeat' at line 2), got <eof>; did you forget to close 'repeat' at line 4?",
+            e.getErrors().front().getMessage()
+        );
     }
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_nesting_based_end_detection_local_function")
 {
-    ScopedFastFlag sff[] = {
-        {FFlag::DebugLuauDeferredConstraintResolution, false},
-    };
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
 
     try
     {
@@ -1192,16 +1201,15 @@ end
     }
     catch (const ParseErrors& e)
     {
-        CHECK_EQ("Expected 'end' (to close 'function' at line 2), got <eof>; did you forget to close 'else' at line 8?",
-            e.getErrors().front().getMessage());
+        CHECK_EQ(
+            "Expected 'end' (to close 'function' at line 2), got <eof>; did you forget to close 'else' at line 8?", e.getErrors().front().getMessage()
+        );
     }
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_nesting_based_end_detection_failsafe_earlier")
 {
-    ScopedFastFlag sff[] = {
-        {FFlag::DebugLuauDeferredConstraintResolution, false},
-    };
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
 
     try
     {
@@ -1261,8 +1269,9 @@ end
     }
     catch (const ParseErrors& e)
     {
-        CHECK_EQ("Expected 'end' (to close 'function' at line 2), got <eof>; did you forget to close 'else' at line 8?",
-            e.getErrors().front().getMessage());
+        CHECK_EQ(
+            "Expected 'end' (to close 'function' at line 2), got <eof>; did you forget to close 'else' at line 8?", e.getErrors().front().getMessage()
+        );
     }
 }
 
@@ -1281,7 +1290,8 @@ end
     catch (const ParseErrors& e)
     {
         CHECK_EQ(
-            "Expected ')' (to close '(' at column 17), got '='; did you mean to use '{' when defining a table?", e.getErrors().front().getMessage());
+            "Expected ')' (to close '(' at column 17), got '='; did you mean to use '{' when defining a table?", e.getErrors().front().getMessage()
+        );
     }
 }
 
@@ -1328,18 +1338,25 @@ TEST_CASE_FIXTURE(Fixture, "parse_error_with_too_many_nested_type_group")
     ScopedFastInt sfis{FInt::LuauRecursionLimit, 10};
 
     matchParseError(
-        "function f(): ((((((((((Fail)))))))))) end", "Exceeded allowed recursion depth; simplify your type annotation to make the code compile");
+        "function f(): ((((((((((Fail)))))))))) end", "Exceeded allowed recursion depth; simplify your type annotation to make the code compile"
+    );
 
-    matchParseError("function f(): () -> () -> () -> () -> () -> () -> () -> () -> () -> () -> () end",
-        "Exceeded allowed recursion depth; simplify your type annotation to make the code compile");
+    matchParseError(
+        "function f(): () -> () -> () -> () -> () -> () -> () -> () -> () -> () -> () end",
+        "Exceeded allowed recursion depth; simplify your type annotation to make the code compile"
+    );
 
-    matchParseError("local t: {a: {b: {c: {d: {e: {f: {g: {h: {i: {j: {}}}}}}}}}}}",
-        "Exceeded allowed recursion depth; simplify your type annotation to make the code compile");
+    matchParseError(
+        "local t: {a: {b: {c: {d: {e: {f: {g: {h: {i: {j: {}}}}}}}}}}}",
+        "Exceeded allowed recursion depth; simplify your type annotation to make the code compile"
+    );
 
     matchParseError("local f: ((((((((((Fail))))))))))", "Exceeded allowed recursion depth; simplify your type annotation to make the code compile");
 
-    matchParseError("local t: a & (b & (c & (d & (e & (f & (g & (h & (i & (j & nil)))))))))",
-        "Exceeded allowed recursion depth; simplify your type annotation to make the code compile");
+    matchParseError(
+        "local t: a & (b & (c & (d & (e & (f & (g & (h & (i & (j & nil)))))))))",
+        "Exceeded allowed recursion depth; simplify your type annotation to make the code compile"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "can_parse_complex_unions_successfully")
@@ -1369,8 +1386,9 @@ local f:
 local f: a? | b? | c? | d? | e? | f? | g? | h?
 )");
 
-    matchParseError("local t: a & b & c & d & e & f & g & h & i & j & nil",
-        "Exceeded allowed type length; simplify your type annotation to make the code compile");
+    matchParseError(
+        "local t: a & b & c & d & e & f & g & h & i & j & nil", "Exceeded allowed type length; simplify your type annotation to make the code compile"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_error_with_too_many_nested_if_statements")
@@ -1380,7 +1398,8 @@ TEST_CASE_FIXTURE(Fixture, "parse_error_with_too_many_nested_if_statements")
     matchParseErrorPrefix(
         "function f() if true then if true then if true then if true then if true then if true then if true then if true then if true "
         "then if true then if true then end end end end end end end end end end end end",
-        "Exceeded allowed recursion depth;");
+        "Exceeded allowed recursion depth;"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_error_with_too_many_changed_elseif_statements")
@@ -1390,16 +1409,19 @@ TEST_CASE_FIXTURE(Fixture, "parse_error_with_too_many_changed_elseif_statements"
     matchParseErrorPrefix(
         "function f() if false then elseif false then elseif false then elseif false then elseif false then elseif false then elseif "
         "false then elseif false then elseif false then elseif false then elseif false then end end",
-        "Exceeded allowed recursion depth;");
+        "Exceeded allowed recursion depth;"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_error_with_too_many_nested_ifelse_expressions1")
 {
     ScopedFastInt sfis{FInt::LuauRecursionLimit, 10};
 
-    matchParseError("function f() return if true then 1 elseif true then 2 elseif true then 3 elseif true then 4 elseif true then 5 elseif true then "
-                    "6 elseif true then 7 elseif true then 8 elseif true then 9 elseif true then 10 else 11 end",
-        "Exceeded allowed recursion depth; simplify your expression to make the code compile");
+    matchParseError(
+        "function f() return if true then 1 elseif true then 2 elseif true then 3 elseif true then 4 elseif true then 5 elseif true then "
+        "6 elseif true then 7 elseif true then 8 elseif true then 9 elseif true then 10 else 11 end",
+        "Exceeded allowed recursion depth; simplify your expression to make the code compile"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_error_with_too_many_nested_ifelse_expressions2")
@@ -1409,16 +1431,19 @@ TEST_CASE_FIXTURE(Fixture, "parse_error_with_too_many_nested_ifelse_expressions2
     matchParseError(
         "function f() return if if if if if if if if if if true then false else true then false else true then false else true then false else true "
         "then false else true then false else true then false else true then false else true then false else true then 1 else 2 end",
-        "Exceeded allowed recursion depth; simplify your expression to make the code compile");
+        "Exceeded allowed recursion depth; simplify your expression to make the code compile"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "unparenthesized_function_return_type_list")
 {
     matchParseError(
-        "function foo(): string, number end", "Expected a statement, got ','; did you forget to wrap the list of return types in parentheses?");
+        "function foo(): string, number end", "Expected a statement, got ','; did you forget to wrap the list of return types in parentheses?"
+    );
 
-    matchParseError("function foo(): (number) -> string, string",
-        "Expected a statement, got ','; did you forget to wrap the list of return types in parentheses?");
+    matchParseError(
+        "function foo(): (number) -> string, string", "Expected a statement, got ','; did you forget to wrap the list of return types in parentheses?"
+    );
 
     // Will throw if the parse fails
     parse(R"(
@@ -1726,12 +1751,14 @@ TEST_CASE_FIXTURE(Fixture, "end_extent_doesnt_consume_comments_even_with_capture
     ParseOptions opts;
     opts.captureComments = true;
 
-    AstStatBlock* block = parse(R"(
+    AstStatBlock* block = parse(
+        R"(
         type F = number
         --comment
         print('hello')
     )",
-        opts);
+        opts
+    );
 
     REQUIRE_EQ(2, block->body.size);
     CHECK_EQ((Position{1, 23}), block->body.data[0]->location.end);
@@ -1747,45 +1774,53 @@ TEST_CASE_FIXTURE(Fixture, "parse_error_loop_control")
 
 TEST_CASE_FIXTURE(Fixture, "parse_error_confusing_function_call")
 {
-    auto result1 = matchParseError(R"(
+    auto result1 = matchParseError(
+        R"(
         function add(x, y) return x + y end
         add
         (4, 7)
     )",
         "Ambiguous syntax: this looks like an argument list for a function call, but could also be a start of new statement; use ';' to separate "
-        "statements");
+        "statements"
+    );
 
     CHECK(result1.errors.size() == 1);
 
-    auto result2 = matchParseError(R"(
+    auto result2 = matchParseError(
+        R"(
         function add(x, y) return x + y end
         local f = add
         (f :: any)['x'] = 2
     )",
         "Ambiguous syntax: this looks like an argument list for a function call, but could also be a start of new statement; use ';' to separate "
-        "statements");
+        "statements"
+    );
 
     CHECK(result2.errors.size() == 1);
 
-    auto result3 = matchParseError(R"(
+    auto result3 = matchParseError(
+        R"(
         local x = {}
         function x:add(a, b) return a + b end
         x:add
         (1, 2)
     )",
         "Ambiguous syntax: this looks like an argument list for a function call, but could also be a start of new statement; use ';' to separate "
-        "statements");
+        "statements"
+    );
 
     CHECK(result3.errors.size() == 1);
 
-    auto result4 = matchParseError(R"(
+    auto result4 = matchParseError(
+        R"(
         local t = {}
         function f() return t end
         t.x, (f)
         ().y = 5, 6
     )",
         "Ambiguous syntax: this looks like an argument list for a function call, but could also be a start of new statement; use ';' to separate "
-        "statements");
+        "statements"
+    );
 
     CHECK(result4.errors.size() == 1);
 }
@@ -1797,17 +1832,21 @@ TEST_CASE_FIXTURE(Fixture, "parse_error_varargs")
 
 TEST_CASE_FIXTURE(Fixture, "parse_error_assignment_lvalue")
 {
-    matchParseError(R"(
+    matchParseError(
+        R"(
         local a, b
         (2), b = b, a
     )",
-        "Assigned expression must be a variable or a field");
+        "Assigned expression must be a variable or a field"
+    );
 
-    matchParseError(R"(
+    matchParseError(
+        R"(
         local a, b
         a, (3) = b, a
     )",
-        "Assigned expression must be a variable or a field");
+        "Assigned expression must be a variable or a field"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_error_type_annotation")
@@ -1870,18 +1909,23 @@ TEST_CASE_FIXTURE(Fixture, "parse_declarations")
     AstStatDeclareGlobal* global = stat->body.data[0]->as<AstStatDeclareGlobal>();
     REQUIRE(global);
     CHECK(global->name == "foo");
+    CHECK(global->nameLocation == Location({1, 16}, {1, 19}));
     CHECK(global->type);
 
     AstStatDeclareFunction* func = stat->body.data[1]->as<AstStatDeclareFunction>();
     REQUIRE(func);
     CHECK(func->name == "bar");
+    CHECK(func->nameLocation == Location({2, 25}, {2, 28}));
     REQUIRE_EQ(func->params.types.size, 1);
     REQUIRE_EQ(func->retTypes.types.size, 1);
 
     AstStatDeclareFunction* varFunc = stat->body.data[2]->as<AstStatDeclareFunction>();
     REQUIRE(varFunc);
     CHECK(varFunc->name == "var");
+    CHECK(varFunc->nameLocation == Location({3, 25}, {3, 28}));
     CHECK(varFunc->params.tailType);
+    CHECK(varFunc->vararg);
+    CHECK(varFunc->varargLocation == Location({3, 29}, {3, 32}));
 
     matchParseError("declare function foo(x)", "All declaration parameters must be annotated");
     matchParseError("declare foo", "Expected ':' when parsing global variable declaration, got <eof>");
@@ -1912,11 +1956,16 @@ TEST_CASE_FIXTURE(Fixture, "parse_class_declarations")
 
     AstDeclaredClassProp& prop = declaredClass->props.data[0];
     CHECK(prop.name == "prop");
+    CHECK(prop.nameLocation == Location({2, 12}, {2, 16}));
     CHECK(prop.ty->is<AstTypeReference>());
+    CHECK(prop.location == Location({2, 12}, {2, 24}));
 
     AstDeclaredClassProp& method = declaredClass->props.data[1];
     CHECK(method.name == "method");
+    CHECK(method.nameLocation == Location({3, 21}, {3, 27}));
     CHECK(method.ty->is<AstTypeFunction>());
+    CHECK(method.location == Location({3, 12}, {3, 54}));
+    CHECK(method.isMethod);
 
     AstStatDeclareClass* subclass = stat->body.data[1]->as<AstStatDeclareClass>();
     REQUIRE(subclass);
@@ -1927,19 +1976,23 @@ TEST_CASE_FIXTURE(Fixture, "parse_class_declarations")
     REQUIRE_EQ(subclass->props.size, 1);
     AstDeclaredClassProp& prop2 = subclass->props.data[0];
     CHECK(prop2.name == "prop2");
+    CHECK(prop2.nameLocation == Location({7, 12}, {7, 17}));
     CHECK(prop2.ty->is<AstTypeReference>());
+    CHECK(prop2.location == Location({7, 12}, {7, 25}));
 }
 
 TEST_CASE_FIXTURE(Fixture, "class_method_properties")
 {
-    const ParseResult p1 = matchParseError(R"(
+    const ParseResult p1 = matchParseError(
+        R"(
         declare class Foo
             -- method's first parameter must be 'self'
             function method(foo: number)
             function method2(self)
         end
         )",
-        "'self' must be present as the unannotated first parameter");
+        "'self' must be present as the unannotated first parameter"
+    );
 
     REQUIRE_EQ(1, p1.root->body.size);
 
@@ -1948,13 +2001,15 @@ TEST_CASE_FIXTURE(Fixture, "class_method_properties")
 
     CHECK_EQ(2, klass->props.size);
 
-    const ParseResult p2 = matchParseError(R"(
+    const ParseResult p2 = matchParseError(
+        R"(
         declare class Foo
             function method(self, foo)
             function method2()
         end
         )",
-        "All declaration parameters aside from 'self' must be annotated");
+        "All declaration parameters aside from 'self' must be annotated"
+    );
 
     REQUIRE_EQ(1, p2.root->body.size);
 
@@ -1984,14 +2039,16 @@ TEST_CASE_FIXTURE(Fixture, "class_indexer")
     REQUIRE(declaredClass->indexer->resultType->is<AstTypeReference>());
     CHECK(declaredClass->indexer->resultType->as<AstTypeReference>()->name == "number");
 
-    const ParseResult p1 = matchParseError(R"(
+    const ParseResult p1 = matchParseError(
+        R"(
         declare class Foo
             [string]: number
             -- can only have one indexer
             [number]: number
         end
         )",
-        "Cannot have more than one class indexer");
+        "Cannot have more than one class indexer"
+    );
 
     REQUIRE_EQ(1, p1.root->body.size);
 
@@ -2002,7 +2059,6 @@ TEST_CASE_FIXTURE(Fixture, "class_indexer")
 
 TEST_CASE_FIXTURE(Fixture, "parse_variadics")
 {
-    //clang-format off
     AstStatBlock* stat = parseEx(R"(
         function foo(bar, ...: number): ...string
         end
@@ -2011,7 +2067,6 @@ TEST_CASE_FIXTURE(Fixture, "parse_variadics")
         type Bar = () -> (number, ...boolean)
     )")
                              .root;
-    //clang-format on
 
     REQUIRE(stat);
     REQUIRE_EQ(stat->body.size, 3);
@@ -2060,6 +2115,20 @@ TEST_CASE_FIXTURE(Fixture, "variadic_definition_parsing")
 
     matchParseError("declare function foo(...)", "All declaration parameters must be annotated");
     matchParseError("declare class Foo function a(self, ...) end", "All declaration parameters aside from 'self' must be annotated");
+}
+
+TEST_CASE_FIXTURE(Fixture, "missing_declaration_prop")
+{
+    ScopedFastFlag luauErrorRecoveryForClassNames{FFlag::LuauErrorRecoveryForClassNames, true};
+
+    matchParseError(
+        R"(
+        declare class Foo
+            a: number,
+        end
+    )",
+        "Expected identifier when parsing property name, got ','"
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "generic_pack_parsing")
@@ -2184,8 +2253,9 @@ TEST_CASE_FIXTURE(Fixture, "function_type_named_arguments")
         CHECK_EQ(funcRet->argNames.data[2]->first, "f");
     }
 
-    matchParseError("type MyFunc = (a: number, b: string, c: number) -> (d: number, e: string, f: number)",
-        "Expected '->' when parsing function type, got <eof>");
+    matchParseError(
+        "type MyFunc = (a: number, b: string, c: number) -> (d: number, e: string, f: number)", "Expected '->' when parsing function type, got <eof>"
+    );
 
     matchParseError("type MyFunc = (number) -> (d: number) <a, b, c> -> number", "Expected '->' when parsing function type, got '<'");
 }
@@ -2219,8 +2289,11 @@ TEST_CASE_FIXTURE(Fixture, "parse_type_alias_default_type_errors")
 
 TEST_CASE_FIXTURE(Fixture, "parse_type_pack_errors")
 {
-    matchParseError("type Y<T...> = {a: T..., b: number}", "Unexpected '...' after type name; type pack is not allowed in this context",
-        Location{{0, 20}, {0, 23}});
+    matchParseError(
+        "type Y<T...> = {a: T..., b: number}",
+        "Unexpected '...' after type name; type pack is not allowed in this context",
+        Location{{0, 20}, {0, 23}}
+    );
     matchParseError("type Y<T...> = {a: (number | string)...", "Unexpected '...' after type annotation", Location{{0, 36}, {0, 39}});
 }
 
@@ -2296,6 +2369,51 @@ TEST_CASE_FIXTURE(Fixture, "invalid_type_forms")
     matchParseError("type A = (b: number)", "Expected '->' when parsing function type, got <eof>");
     matchParseError("type P<T...> = () -> T... type B = P<(x: number, y: string)>", "Expected '->' when parsing function type, got '>'");
     matchParseError("type F<T... = (a: string)> = (T...) -> ()", "Expected '->' when parsing function type, got '>'");
+}
+
+TEST_CASE_FIXTURE(Fixture, "parse_user_defined_type_functions")
+{
+    AstStat* stat = parse(R"(
+        type function foo()
+            return types.number
+        end
+
+        export type function bar()
+            return types.string
+        end
+    )");
+
+    REQUIRE(stat != nullptr);
+    AstStatTypeFunction* f = stat->as<AstStatBlock>()->body.data[0]->as<AstStatTypeFunction>();
+    REQUIRE(f != nullptr);
+    REQUIRE(f->name == "foo");
+}
+
+TEST_CASE_FIXTURE(Fixture, "parse_nested_type_function")
+{
+    AstStat* stat = parse(R"(
+        local v1 = 1
+        type function foo()
+            local v2 = 2
+            local function bar()
+                v2 += 1
+                type function inner() end
+                v2 += 2
+            end
+            local function bar2()
+                v2 += 3
+            end
+        end
+        local function bar() v1 += 1 end
+    )");
+
+    REQUIRE(stat != nullptr);
+}
+
+TEST_CASE_FIXTURE(Fixture, "invalid_user_defined_type_functions")
+{
+    matchParseError("local foo = 1; type function bar() print(foo) end", "Type function cannot reference outer local 'foo'");
+    matchParseError("type function foo() local v1 = 1; type function bar() print(v1) end end", "Type function cannot reference outer local 'v1'");
 }
 
 TEST_SUITE_END();
@@ -2465,7 +2583,8 @@ public:
 
 TEST_CASE_FIXTURE(Fixture, "recovery_of_parenthesized_expressions")
 {
-    auto checkAstEquivalence = [this](const char* codeWithErrors, const char* code) {
+    auto checkAstEquivalence = [this](const char* codeWithErrors, const char* code)
+    {
         try
         {
             parse(codeWithErrors);
@@ -2485,7 +2604,8 @@ TEST_CASE_FIXTURE(Fixture, "recovery_of_parenthesized_expressions")
         CHECK_EQ(counterWithErrors.count, counter.count);
     };
 
-    auto checkRecovery = [this, checkAstEquivalence](const char* codeWithErrors, const char* code, unsigned expectedErrorCount) {
+    auto checkRecovery = [this, checkAstEquivalence](const char* codeWithErrors, const char* code, unsigned expectedErrorCount)
+    {
         try
         {
             parse(codeWithErrors);
@@ -2498,13 +2618,12 @@ TEST_CASE_FIXTURE(Fixture, "recovery_of_parenthesized_expressions")
         }
     };
 
-    ScopedFastFlag sff[] = {
-        {FFlag::DebugLuauDeferredConstraintResolution, false},
-    };
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
 
     checkRecovery("function foo(a, b. c) return a + b end", "function foo(a, b) return a + b end", 1);
-    checkRecovery("function foo(a, b: { a: number, b: number. c:number }) return a + b end",
-        "function foo(a, b: { a: number, b: number }) return a + b end", 1);
+    checkRecovery(
+        "function foo(a, b: { a: number, b: number. c:number }) return a + b end", "function foo(a, b: { a: number, b: number }) return a + b end", 1
+    );
 
     checkRecovery("function foo(a, b): (number -> number return a + b end", "function foo(a, b): (number) -> number return a + b end", 1);
     checkRecovery("function foo(a, b): (number, number -> number return a + b end", "function foo(a, b): (number) -> number return a + b end", 1);
@@ -2521,12 +2640,15 @@ TEST_CASE_FIXTURE(Fixture, "recovery_of_parenthesized_expressions")
     checkRecovery("local n: (string | number = 2", "local n: (string | number) = 2", 1);
 
     // Check that we correctly stop at the end of a line
-    checkRecovery(R"(
+    checkRecovery(
+        R"(
 function foo(a, b
     return a + b
 end
 )",
-        "function foo(a, b) return a + b end", 1);
+        "function foo(a, b) return a + b end",
+        1
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "incomplete_method_call")
@@ -2620,7 +2742,8 @@ TEST_CASE_FIXTURE(Fixture, "capture_comments")
     ParseOptions options;
     options.captureComments = true;
 
-    ParseResult result = parseEx(R"(
+    ParseResult result = parseEx(
+        R"(
         --!strict
 
         local a = 5 -- comment one
@@ -2630,7 +2753,8 @@ TEST_CASE_FIXTURE(Fixture, "capture_comments")
         ]]
         local c = 'see'
     )",
-        options);
+        options
+    );
 
     CHECK(result.errors.empty());
 
@@ -2646,10 +2770,12 @@ TEST_CASE_FIXTURE(Fixture, "capture_broken_comment_at_the_start_of_the_file")
     ParseOptions options;
     options.captureComments = true;
 
-    ParseResult result = tryParse(R"(
+    ParseResult result = tryParse(
+        R"(
         --[[
     )",
-        options);
+        options
+    );
 
     CHECK_EQ(1, result.commentLocations.size());
     CHECK_EQ((Location{{1, 8}, {2, 4}}), result.commentLocations[0].location);
@@ -2660,12 +2786,14 @@ TEST_CASE_FIXTURE(Fixture, "capture_broken_comment")
     ParseOptions options;
     options.captureComments = true;
 
-    ParseResult result = tryParse(R"(
+    ParseResult result = tryParse(
+        R"(
         local a = "test"
 
         --[[broken!
     )",
-        options);
+        options
+    );
 
     CHECK_EQ(1, result.commentLocations.size());
     CHECK_EQ((Location{{3, 8}, {4, 4}}), result.commentLocations[0].location);
@@ -2732,9 +2860,7 @@ TEST_CASE_FIXTURE(Fixture, "AstName_comparison")
 
 TEST_CASE_FIXTURE(Fixture, "generic_type_list_recovery")
 {
-    ScopedFastFlag sff[] = {
-        {FFlag::DebugLuauDeferredConstraintResolution, false},
-    };
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
 
     try
     {
@@ -2839,8 +2965,10 @@ TEST_CASE_FIXTURE(Fixture, "error_message_for_using_function_as_type_annotation"
         type Foo = function
     )");
     REQUIRE_EQ(1, result.errors.size());
-    CHECK_EQ("Using 'function' as a type annotation is not supported, consider replacing with a function type annotation e.g. '(...any) -> ...any'",
-        result.errors[0].getMessage());
+    CHECK_EQ(
+        "Using 'function' as a type annotation is not supported, consider replacing with a function type annotation e.g. '(...any) -> ...any'",
+        result.errors[0].getMessage()
+    );
 }
 
 TEST_CASE_FIXTURE(Fixture, "get_a_nice_error_when_there_is_an_extra_comma_at_the_end_of_a_function_argument_list")
@@ -3028,8 +3156,6 @@ TEST_CASE_FIXTURE(Fixture, "do_block_with_no_end")
 
 TEST_CASE_FIXTURE(Fixture, "parse_interpolated_string_with_lookahead_involved")
 {
-    ScopedFastFlag sff{FFlag::LuauLexerLookaheadRemembersBraceType, true};
-
     ParseResult result = tryParse(R"(
         local x = `{ {y} }`
     )");
@@ -3039,8 +3165,6 @@ TEST_CASE_FIXTURE(Fixture, "parse_interpolated_string_with_lookahead_involved")
 
 TEST_CASE_FIXTURE(Fixture, "parse_interpolated_string_with_lookahead_involved2")
 {
-    ScopedFastFlag sff{FFlag::LuauLexerLookaheadRemembersBraceType, true};
-
     ParseResult result = tryParse(R"(
         local x = `{ { y{} } }`
     )");
@@ -3052,10 +3176,9 @@ TEST_CASE_FIXTURE(Fixture, "parse_top_level_checked_fn")
 {
     ParseOptions opts;
     opts.allowDeclarationSyntax = true;
-    ScopedFastFlag sff{FFlag::LuauCheckedFunctionSyntax, true};
 
     std::string src = R"BUILTIN_SRC(
-declare function @checked abs(n: number): number
+@checked declare function abs(n: number): number
 )BUILTIN_SRC";
 
     ParseResult pr = tryParse(src, opts);
@@ -3065,14 +3188,13 @@ declare function @checked abs(n: number): number
     AstStat* root = *(pr.root->body.data);
     auto func = root->as<AstStatDeclareFunction>();
     LUAU_ASSERT(func);
-    LUAU_ASSERT(func->checkedFunction);
+    LUAU_ASSERT(func->isCheckedFunction());
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_declared_table_checked_member")
 {
     ParseOptions opts;
     opts.allowDeclarationSyntax = true;
-    ScopedFastFlag sff{FFlag::LuauCheckedFunctionSyntax, true};
 
     const std::string src = R"BUILTIN_SRC(
     declare math : {
@@ -3093,19 +3215,20 @@ TEST_CASE_FIXTURE(Fixture, "parse_declared_table_checked_member")
     auto prop = *tbl->props.data;
     auto func = prop.type->as<AstTypeFunction>();
     LUAU_ASSERT(func);
-    LUAU_ASSERT(func->checkedFunction);
+    LUAU_ASSERT(func->isCheckedFunction());
 }
 
 TEST_CASE_FIXTURE(Fixture, "parse_checked_outside_decl_fails")
 {
     ParseOptions opts;
     opts.allowDeclarationSyntax = true;
-    ScopedFastFlag sff{FFlag::LuauCheckedFunctionSyntax, true};
 
-    ParseResult pr = tryParse(R"(
+    ParseResult pr = tryParse(
+        R"(
     local @checked = 3
 )",
-        opts);
+        opts
+    );
     LUAU_ASSERT(pr.errors.size() > 0);
     auto ts = pr.errors[1].getMessage();
 }
@@ -3114,13 +3237,14 @@ TEST_CASE_FIXTURE(Fixture, "parse_checked_in_and_out_of_decl_fails")
 {
     ParseOptions opts;
     opts.allowDeclarationSyntax = true;
-    ScopedFastFlag sff{FFlag::LuauCheckedFunctionSyntax, true};
 
-    auto pr = tryParse(R"(
+    auto pr = tryParse(
+        R"(
     local @checked = 3
-    declare function @checked abs(n: number): number
+    @checked declare function abs(n: number): number
 )",
-        opts);
+        opts
+    );
     LUAU_ASSERT(pr.errors.size() == 2);
     LUAU_ASSERT(pr.errors[0].getLocation().begin.line == 1);
     LUAU_ASSERT(pr.errors[1].getLocation().begin.line == 1);
@@ -3130,13 +3254,14 @@ TEST_CASE_FIXTURE(Fixture, "parse_checked_as_function_name_fails")
 {
     ParseOptions opts;
     opts.allowDeclarationSyntax = true;
-    ScopedFastFlag sff{FFlag::LuauCheckedFunctionSyntax, true};
 
-    auto pr = tryParse(R"(
-    function @checked(x: number) : number
+    auto pr = tryParse(
+        R"(
+    @checked function(x: number) : number
     end
 )",
-        opts);
+        opts
+    );
     LUAU_ASSERT(pr.errors.size() > 0);
 }
 
@@ -3144,20 +3269,19 @@ TEST_CASE_FIXTURE(Fixture, "cannot_use_@_as_variable_name")
 {
     ParseOptions opts;
     opts.allowDeclarationSyntax = true;
-    ScopedFastFlag sff{FFlag::LuauCheckedFunctionSyntax, true};
 
-    auto pr = tryParse(R"(
+    auto pr = tryParse(
+        R"(
     local @blah = 3
 )",
-        opts);
+        opts
+    );
 
     LUAU_ASSERT(pr.errors.size() > 0);
 }
 
 TEST_CASE_FIXTURE(Fixture, "read_write_table_properties")
 {
-    ScopedFastFlag sff{FFlag::LuauReadWritePropertySyntax, true};
-
     auto pr = tryParse(R"(
         type A = {read x: number}
         type B = {write x: number}
@@ -3176,5 +3300,448 @@ TEST_CASE_FIXTURE(Fixture, "read_write_table_properties")
 
     LUAU_ASSERT(pr.errors.size() == 0);
 }
+
+void checkAttribute(const AstAttr* attr, const AstAttr::Type type, const Location& location)
+{
+    CHECK_EQ(attr->type, type);
+    CHECK_EQ(attr->location, location);
+}
+
+void checkFirstErrorForAttributes(const std::vector<ParseError>& errors, const size_t minSize, const Location& location, const std::string& message)
+{
+    LUAU_ASSERT(minSize >= 1);
+
+    CHECK_GE(errors.size(), minSize);
+    CHECK_EQ(errors[0].getLocation(), location);
+    CHECK_EQ(errors[0].getMessage(), message);
+}
+
+TEST_CASE_FIXTURE(Fixture, "parse_attribute_on_function_stat")
+{
+
+    AstStatBlock* stat = parse(R"(
+@checked
+function hello(x, y)
+    return x + y
+end)");
+
+    LUAU_ASSERT(stat != nullptr);
+
+    AstStatFunction* statFun = stat->body.data[0]->as<AstStatFunction>();
+    LUAU_ASSERT(statFun != nullptr);
+
+    AstArray<AstAttr*> attributes = statFun->func->attributes;
+
+    CHECK_EQ(attributes.size, 1);
+
+    checkAttribute(attributes.data[0], AstAttr::Type::Checked, Location(Position(1, 0), Position(1, 8)));
+}
+
+TEST_CASE_FIXTURE(Fixture, "parse_attribute_for_function_expression")
+{
+    AstStatBlock* stat1 = parse(R"(
+local function invoker(f)
+    return f(1)
+end
+
+invoker(@checked function(x) return (x + 2) end)
+)");
+
+    LUAU_ASSERT(stat1 != nullptr);
+
+    AstExprFunction* func1 = stat1->body.data[1]->as<AstStatExpr>()->expr->as<AstExprCall>()->args.data[0]->as<AstExprFunction>();
+    LUAU_ASSERT(func1 != nullptr);
+
+    AstArray<AstAttr*> attributes1 = func1->attributes;
+
+    CHECK_EQ(attributes1.size, 1);
+
+    checkAttribute(attributes1.data[0], AstAttr::Type::Checked, Location(Position(5, 8), Position(5, 16)));
+
+    AstStatBlock* stat2 = parse(R"(
+local f = @checked function(x) return (x + 2) end
+)");
+
+    LUAU_ASSERT(stat2 != nullptr);
+
+    AstExprFunction* func2 = stat2->body.data[0]->as<AstStatLocal>()->values.data[0]->as<AstExprFunction>();
+    LUAU_ASSERT(func2 != nullptr);
+
+    AstArray<AstAttr*> attributes2 = func2->attributes;
+
+    CHECK_EQ(attributes2.size, 1);
+
+    checkAttribute(attributes2.data[0], AstAttr::Type::Checked, Location(Position(1, 10), Position(1, 18)));
+}
+
+TEST_CASE_FIXTURE(Fixture, "parse_attribute_on_local_function_stat")
+{
+    AstStatBlock* stat = parse(R"(
+    @checked
+local function hello(x, y)
+    return x + y
+end)");
+
+    LUAU_ASSERT(stat != nullptr);
+
+    AstStatLocalFunction* statFun = stat->body.data[0]->as<AstStatLocalFunction>();
+    LUAU_ASSERT(statFun != nullptr);
+
+    AstArray<AstAttr*> attributes = statFun->func->attributes;
+
+    CHECK_EQ(attributes.size, 1);
+
+    checkAttribute(attributes.data[0], AstAttr::Type::Checked, Location(Position(1, 4), Position(1, 12)));
+}
+
+TEST_CASE_FIXTURE(Fixture, "empty_attribute_name_is_not_allowed")
+{
+    ParseResult result = tryParse(R"(
+@
+function hello(x, y)
+    return x + y
+end)");
+
+    checkFirstErrorForAttributes(result.errors, 1, Location(Position(1, 0), Position(1, 1)), "Attribute name is missing");
+}
+
+TEST_CASE_FIXTURE(Fixture, "dont_parse_attributes_on_non_function_stat")
+{
+    ParseResult pr1 = tryParse(R"(
+@checked
+if a<0 then a = 0 end)");
+    checkFirstErrorForAttributes(
+        pr1.errors,
+        1,
+        Location(Position(2, 0), Position(2, 2)),
+        "Expected 'function', 'local function', 'declare function' or a function type declaration after attribute, but got 'if' instead"
+    );
+
+    ParseResult pr2 = tryParse(R"(
+local i = 1
+@checked
+while a[i] do
+    print(a[i])
+    i = i + 1
+end)");
+    checkFirstErrorForAttributes(
+        pr2.errors,
+        1,
+        Location(Position(3, 0), Position(3, 5)),
+        "Expected 'function', 'local function', 'declare function' or a function type declaration after attribute, but got 'while' instead"
+    );
+
+    ParseResult pr3 = tryParse(R"(
+@checked
+do
+    local a2 = 2*a
+    local d = sqrt(b^2 - 4*a*c)
+    x1 = (-b + d)/a2
+    x2 = (-b - d)/a2
+end)");
+    checkFirstErrorForAttributes(
+        pr3.errors,
+        1,
+        Location(Position(2, 0), Position(2, 2)),
+        "Expected 'function', 'local function', 'declare function' or a function type declaration after attribute, but got 'do' instead"
+    );
+
+    ParseResult pr4 = tryParse(R"(
+@checked
+for i=1,10 do print(i) end
+)");
+    checkFirstErrorForAttributes(
+        pr4.errors,
+        1,
+        Location(Position(2, 0), Position(2, 3)),
+        "Expected 'function', 'local function', 'declare function' or a function type declaration after attribute, but got 'for' instead"
+    );
+
+    ParseResult pr5 = tryParse(R"(
+@checked
+repeat
+    line = io.read()
+until line ~= ""
+)");
+    checkFirstErrorForAttributes(
+        pr5.errors,
+        1,
+        Location(Position(2, 0), Position(2, 6)),
+        "Expected 'function', 'local function', 'declare function' or a function type declaration after attribute, but got 'repeat' instead"
+    );
+
+
+    ParseResult pr6 = tryParse(R"(
+@checked
+local x = 10
+)");
+    checkFirstErrorForAttributes(
+        pr6.errors, 1, Location(Position(2, 6), Position(2, 7)), "Expected 'function' after local declaration with attribute, but got 'x' instead"
+    );
+
+    ParseResult pr7 = tryParse(R"(
+local i = 1
+while a[i] do
+    if a[i] == v then @checked break end
+    i = i + 1
+end
+)");
+    checkFirstErrorForAttributes(
+        pr7.errors,
+        1,
+        Location(Position(3, 31), Position(3, 36)),
+        "Expected 'function', 'local function', 'declare function' or a function type declaration after attribute, but got 'break' instead"
+    );
+
+
+    ParseResult pr8 = tryParse(R"(
+function foo1 () @checked return 'a' end
+)");
+    checkFirstErrorForAttributes(
+        pr8.errors,
+        1,
+        Location(Position(1, 26), Position(1, 32)),
+        "Expected 'function', 'local function', 'declare function' or a function type declaration after attribute, but got 'return' instead"
+    );
+}
+
+TEST_CASE_FIXTURE(Fixture, "dont_parse_attribute_on_argument_non_function")
+{
+    ParseResult pr = tryParse(R"(
+local function invoker(f, y)
+    return f(y)
+end
+
+invoker(function(x) return (x + 2) end, @checked 1)
+)");
+
+    checkFirstErrorForAttributes(
+        pr.errors, 1, Location(Position(5, 40), Position(5, 48)), "Expected 'function' declaration after attribute, but got '1' instead"
+    );
+}
+
+TEST_CASE_FIXTURE(Fixture, "parse_attribute_on_function_type_declaration")
+{
+    ParseOptions opts;
+    opts.allowDeclarationSyntax = true;
+
+    std::string src = R"(
+@checked declare function abs(n: number): number
+)";
+
+    ParseResult pr = tryParse(src, opts);
+    CHECK_EQ(pr.errors.size(), 0);
+
+    LUAU_ASSERT(pr.root->body.size == 1);
+
+    AstStat* root = *(pr.root->body.data);
+
+    auto func = root->as<AstStatDeclareFunction>();
+    LUAU_ASSERT(func != nullptr);
+
+    CHECK(func->isCheckedFunction());
+
+    AstArray<AstAttr*> attributes = func->attributes;
+
+    checkAttribute(attributes.data[0], AstAttr::Type::Checked, Location(Position(1, 0), Position(1, 8)));
+}
+
+TEST_CASE_FIXTURE(Fixture, "parse_attributes_on_function_type_declaration_in_table")
+{
+    ParseOptions opts;
+    opts.allowDeclarationSyntax = true;
+
+    std::string src = R"(
+declare bit32: {
+    band: @checked (...number) -> number
+})";
+
+    ParseResult pr = tryParse(src, opts);
+    CHECK_EQ(pr.errors.size(), 0);
+
+    LUAU_ASSERT(pr.root->body.size == 1);
+
+    AstStat* root = *(pr.root->body.data);
+
+    AstStatDeclareGlobal* glob = root->as<AstStatDeclareGlobal>();
+    LUAU_ASSERT(glob);
+
+    auto tbl = glob->type->as<AstTypeTable>();
+    LUAU_ASSERT(tbl);
+
+    LUAU_ASSERT(tbl->props.size == 1);
+    AstTableProp prop = tbl->props.data[0];
+
+    AstTypeFunction* func = prop.type->as<AstTypeFunction>();
+    LUAU_ASSERT(func);
+
+    AstArray<AstAttr*> attributes = func->attributes;
+
+    CHECK_EQ(attributes.size, 1);
+    checkAttribute(attributes.data[0], AstAttr::Type::Checked, Location(Position(2, 10), Position(2, 18)));
+}
+
+TEST_CASE_FIXTURE(Fixture, "dont_parse_attributes_on_non_function_type_declarations")
+{
+    ParseOptions opts;
+    opts.allowDeclarationSyntax = true;
+
+    ParseResult pr1 = tryParse(
+        R"(
+@checked declare foo: number
+    )",
+        opts
+    );
+
+    checkFirstErrorForAttributes(
+        pr1.errors, 1, Location(Position(1, 17), Position(1, 20)), "Expected a function type declaration after attribute, but got 'foo' instead"
+    );
+
+    ParseResult pr2 = tryParse(
+        R"(
+@checked declare class Foo
+    prop: number
+    function method(self, foo: number): string
+end)",
+        opts
+    );
+
+    checkFirstErrorForAttributes(
+        pr2.errors, 1, Location(Position(1, 17), Position(1, 22)), "Expected a function type declaration after attribute, but got 'class' instead"
+    );
+
+    ParseResult pr3 = tryParse(
+        R"(
+declare bit32: {
+    band: @checked number
+})",
+        opts
+    );
+
+    checkFirstErrorForAttributes(
+        pr3.errors, 1, Location(Position(2, 19), Position(2, 25)), "Expected '(' when parsing function parameters, got 'number'"
+    );
+}
+
+TEST_CASE_FIXTURE(Fixture, "attributes_cannot_be_duplicated")
+{
+    ParseResult result = tryParse(R"(
+@checked
+    @checked
+function hello(x, y)
+    return x + y
+end)");
+
+    checkFirstErrorForAttributes(result.errors, 1, Location(Position(2, 4), Position(2, 12)), "Cannot duplicate attribute '@checked'");
+}
+
+TEST_CASE_FIXTURE(Fixture, "unsupported_attributes_are_not_allowed")
+{
+    ParseResult result = tryParse(R"(
+@checked
+    @cool_attribute
+function hello(x, y)
+    return x + y
+end)");
+
+    checkFirstErrorForAttributes(result.errors, 1, Location(Position(2, 4), Position(2, 19)), "Invalid attribute '@cool_attribute'");
+}
+
+TEST_CASE_FIXTURE(Fixture, "can_parse_leading_bar_unions_successfully")
+{
+    parse(R"(type A = | "Hello" | "World")");
+}
+
+TEST_CASE_FIXTURE(Fixture, "can_parse_leading_ampersand_intersections_successfully")
+{
+    parse(R"(type A = & { string } & { number })");
+}
+
+TEST_CASE_FIXTURE(Fixture, "mixed_leading_intersection_and_union_not_allowed")
+{
+    matchParseError("type A = & number | string | boolean", "Mixing union and intersection types is not allowed; consider wrapping in parentheses.");
+    matchParseError("type A = | number & string & boolean", "Mixing union and intersection types is not allowed; consider wrapping in parentheses.");
+}
+
+TEST_CASE_FIXTURE(Fixture, "grouped_function_type")
+{
+    ScopedFastFlag _{FFlag::LuauAllowComplexTypesInGenericParams, true};
+    const auto root = parse(R"(
+        type X<T> = T
+        local x: X<(() -> ())?>
+    )");
+    LUAU_ASSERT(root);
+    CHECK_EQ(root->body.size, 2);
+    auto assignment = root->body.data[1]->as<AstStatLocal>();
+    LUAU_ASSERT(assignment);
+    CHECK_EQ(assignment->vars.size, 1);
+    CHECK_EQ(assignment->values.size, 0);
+    auto binding = assignment->vars.data[0];
+    CHECK_EQ(binding->name, "x");
+    auto genericTy = binding->annotation->as<AstTypeReference>();
+    LUAU_ASSERT(genericTy);
+    CHECK_EQ(genericTy->parameters.size, 1);
+    auto paramTy = genericTy->parameters.data[0];
+    LUAU_ASSERT(paramTy.type);
+    auto unionTy = paramTy.type->as<AstTypeUnion>();
+    LUAU_ASSERT(unionTy);
+    CHECK_EQ(unionTy->types.size, 2);
+    CHECK(unionTy->types.data[0]->is<AstTypeFunction>());  // () -> ()
+    CHECK(unionTy->types.data[1]->is<AstTypeReference>()); // nil
+}
+
+TEST_CASE_FIXTURE(Fixture, "complex_union_in_generic_ty")
+{
+    ScopedFastFlag _{FFlag::LuauAllowComplexTypesInGenericParams, true};
+    const auto root = parse(R"(
+        type X<T> = T
+        local x: X<
+            | number
+            | boolean
+            | string
+        >
+    )");
+    LUAU_ASSERT(root);
+    CHECK_EQ(root->body.size, 2);
+    auto assignment = root->body.data[1]->as<AstStatLocal>();
+    LUAU_ASSERT(assignment);
+    CHECK_EQ(assignment->vars.size, 1);
+    CHECK_EQ(assignment->values.size, 0);
+    auto binding = assignment->vars.data[0];
+    CHECK_EQ(binding->name, "x");
+    auto genericTy = binding->annotation->as<AstTypeReference>();
+    LUAU_ASSERT(genericTy);
+    CHECK_EQ(genericTy->parameters.size, 1);
+    auto paramTy = genericTy->parameters.data[0];
+    LUAU_ASSERT(paramTy.type);
+    auto unionTy = paramTy.type->as<AstTypeUnion>();
+    LUAU_ASSERT(unionTy);
+    CHECK_EQ(unionTy->types.size, 3);
+    // NOTE: These are `const char*` so we can compare them to `AstName`s later.
+    std::vector<const char*> expectedTypes{"number", "boolean", "string"};
+    for (size_t i = 0; i < expectedTypes.size(); i++)
+    {
+        auto ty = unionTy->types.data[i]->as<AstTypeReference>();
+        LUAU_ASSERT(ty);
+        CHECK_EQ(ty->name, expectedTypes[i]);
+    }
+}
+
+TEST_CASE_FIXTURE(Fixture, "recover_from_bad_table_type")
+{
+    ScopedFastFlag _{FFlag::LuauErrorRecoveryForTableTypes, true};
+    ParseOptions opts;
+    opts.allowDeclarationSyntax = true;
+    const auto result = tryParse(
+        R"(
+        declare class Widget
+            state: {string: function(string, Widget)}
+        end
+    )",
+        opts
+    );
+    CHECK_EQ(result.errors.size(), 2);
+}
+
 
 TEST_SUITE_END();

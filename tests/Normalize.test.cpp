@@ -10,9 +10,9 @@
 #include "Luau/Normalize.h"
 #include "Luau/BuiltinDefinitions.h"
 
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution)
-LUAU_FASTFLAG(LuauTransitiveSubtyping);
-
+LUAU_FASTFLAG(LuauSolverV2)
+LUAU_FASTINT(LuauTypeInferRecursionLimit)
+LUAU_FASTFLAG(LuauNormalizationTracksCyclicPairsThroughInhabitance)
 using namespace Luau;
 
 namespace
@@ -27,22 +27,9 @@ struct IsSubtypeFixture : Fixture
         if (!module->hasModuleScope())
             FAIL("isSubtype: module scope data is not available");
 
-        return ::Luau::isSubtype(a, b, NotNull{module->getModuleScope().get()}, builtinTypes, ice);
-    }
+        SimplifierPtr simplifier = newSimplifier(NotNull{&module->internalTypes}, builtinTypes);
 
-    bool isConsistentSubtype(TypeId a, TypeId b)
-    {
-        // any test that is testing isConsistentSubtype is testing the old solver exclusively!
-        ScopedFastFlag noDcr{FFlag::DebugLuauDeferredConstraintResolution, false};
-
-        Location location;
-        ModulePtr module = getMainModule();
-        REQUIRE(module);
-
-        if (!module->hasModuleScope())
-            FAIL("isSubtype: module scope data is not available");
-
-        return ::Luau::isConsistentSubtype(a, b, NotNull{module->getModuleScope().get()}, builtinTypes, ice);
+        return ::Luau::isSubtype(a, b, NotNull{module->getModuleScope().get()}, builtinTypes, NotNull{simplifier.get()}, ice);
     }
 };
 } // namespace
@@ -88,22 +75,6 @@ TEST_CASE_FIXTURE(IsSubtypeFixture, "functions")
     CHECK(isSubtype(c, a));
     CHECK(!isSubtype(d, a));
     CHECK(isSubtype(a, d));
-}
-
-TEST_CASE_FIXTURE(IsSubtypeFixture, "functions_and_any")
-{
-    check(R"(
-        function a(n: number) return "string" end
-        function b(q: any) return 5 :: any end
-    )");
-
-    TypeId a = requireType("a");
-    TypeId b = requireType("b");
-
-    // any makes things work even when it makes no sense.
-
-    CHECK(isConsistentSubtype(b, a));
-    CHECK(isConsistentSubtype(a, b));
 }
 
 TEST_CASE_FIXTURE(IsSubtypeFixture, "variadic_functions_with_no_head")
@@ -173,7 +144,7 @@ TEST_CASE_FIXTURE(IsSubtypeFixture, "table_with_union_prop")
     TypeId a = requireType("a");
     TypeId b = requireType("b");
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2)
         CHECK(!isSubtype(a, b)); // table properties are invariant
     else
         CHECK(isSubtype(a, b));
@@ -182,10 +153,6 @@ TEST_CASE_FIXTURE(IsSubtypeFixture, "table_with_union_prop")
 
 TEST_CASE_FIXTURE(IsSubtypeFixture, "table_with_any_prop")
 {
-    ScopedFastFlag sffs[] = {
-        {FFlag::LuauTransitiveSubtyping, true},
-    };
-
     check(R"(
         local a: {x: number}
         local b: {x: any}
@@ -194,12 +161,11 @@ TEST_CASE_FIXTURE(IsSubtypeFixture, "table_with_any_prop")
     TypeId a = requireType("a");
     TypeId b = requireType("b");
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2)
         CHECK(!isSubtype(a, b)); // table properties are invariant
     else
         CHECK(isSubtype(a, b));
     CHECK(!isSubtype(b, a));
-    CHECK(isConsistentSubtype(b, a));
 }
 
 TEST_CASE_FIXTURE(IsSubtypeFixture, "intersection")
@@ -243,10 +209,6 @@ TEST_CASE_FIXTURE(IsSubtypeFixture, "union_and_intersection")
 
 TEST_CASE_FIXTURE(IsSubtypeFixture, "tables")
 {
-    ScopedFastFlag sffs[] = {
-        {FFlag::LuauTransitiveSubtyping, true},
-    };
-
     check(R"(
         local a: {x: number}
         local b: {x: any}
@@ -259,12 +221,11 @@ TEST_CASE_FIXTURE(IsSubtypeFixture, "tables")
     TypeId c = requireType("c");
     TypeId d = requireType("d");
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2)
         CHECK(!isSubtype(a, b)); // table properties are invariant
     else
         CHECK(isSubtype(a, b));
     CHECK(!isSubtype(b, a));
-    CHECK(isConsistentSubtype(b, a));
 
     CHECK(!isSubtype(c, a));
     CHECK(!isSubtype(a, c));
@@ -272,7 +233,7 @@ TEST_CASE_FIXTURE(IsSubtypeFixture, "tables")
     CHECK(isSubtype(d, a));
     CHECK(!isSubtype(a, d));
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2)
         CHECK(!isSubtype(d, b)); // table properties are invariant
     else
         CHECK(isSubtype(d, b));
@@ -398,10 +359,6 @@ TEST_CASE_FIXTURE(IsSubtypeFixture, "metatable" * doctest::expected_failures{1})
 
 TEST_CASE_FIXTURE(IsSubtypeFixture, "any_is_unknown_union_error")
 {
-    ScopedFastFlag sffs[] = {
-        {FFlag::LuauTransitiveSubtyping, true},
-    };
-
     check(R"(
         local err = 5.nope.nope -- err is now an error type
         local a : any
@@ -418,10 +375,6 @@ TEST_CASE_FIXTURE(IsSubtypeFixture, "any_is_unknown_union_error")
 
 TEST_CASE_FIXTURE(IsSubtypeFixture, "any_intersect_T_is_T")
 {
-    ScopedFastFlag sffs[] = {
-        {FFlag::LuauTransitiveSubtyping, true},
-    };
-
     check(R"(
         local a : (any & string)
         local b : string
@@ -440,10 +393,6 @@ TEST_CASE_FIXTURE(IsSubtypeFixture, "any_intersect_T_is_T")
 
 TEST_CASE_FIXTURE(IsSubtypeFixture, "error_suppression")
 {
-    ScopedFastFlag sffs[] = {
-        {FFlag::LuauTransitiveSubtyping, true},
-    };
-
     check("");
 
     TypeId any = builtinTypes->anyType;
@@ -453,33 +402,37 @@ TEST_CASE_FIXTURE(IsSubtypeFixture, "error_suppression")
 
     CHECK(!isSubtype(any, err));
     CHECK(isSubtype(err, any));
-    CHECK(isConsistentSubtype(any, err));
-    CHECK(isConsistentSubtype(err, any));
 
     CHECK(!isSubtype(any, str));
     CHECK(isSubtype(str, any));
-    CHECK(isConsistentSubtype(any, str));
-    CHECK(isConsistentSubtype(str, any));
 
-    CHECK(!isSubtype(any, unk));
-    CHECK(isSubtype(unk, any));
-    CHECK(isConsistentSubtype(any, unk));
-    CHECK(isConsistentSubtype(unk, any));
+    // We have added this as an exception - the set of inhabitants of any is exactly the set of inhabitants of unknown (since error has no
+    // inhabitants). any = err | unknown, so under semantic subtyping, {} U unknown = unknown
+    if (FFlag::LuauSolverV2)
+    {
+        CHECK(isSubtype(any, unk));
+    }
+    else
+    {
+        CHECK(!isSubtype(any, unk));
+    }
 
-    CHECK(!isSubtype(err, str));
+    if (FFlag::LuauSolverV2)
+    {
+        CHECK(isSubtype(err, str));
+    }
+    else
+    {
+        CHECK(!isSubtype(err, str));
+    }
+
     CHECK(!isSubtype(str, err));
-    CHECK(isConsistentSubtype(err, str));
-    CHECK(isConsistentSubtype(str, err));
 
     CHECK(!isSubtype(err, unk));
     CHECK(!isSubtype(unk, err));
-    CHECK(isConsistentSubtype(err, unk));
-    CHECK(isConsistentSubtype(unk, err));
 
     CHECK(isSubtype(str, unk));
     CHECK(!isSubtype(unk, str));
-    CHECK(isConsistentSubtype(str, unk));
-    CHECK(!isConsistentSubtype(unk, str));
 }
 
 TEST_SUITE_END();
@@ -490,19 +443,20 @@ struct NormalizeFixture : Fixture
     InternalErrorReporter iceHandler;
     UnifierSharedState unifierState{&iceHandler};
     Normalizer normalizer{&arena, builtinTypes, NotNull{&unifierState}};
+    Scope globalScope{builtinTypes->anyTypePack};
 
     NormalizeFixture()
     {
         registerHiddenTypes(&frontend);
     }
 
-    const NormalizedType* toNormalizedType(const std::string& annotation)
+    std::shared_ptr<const NormalizedType> toNormalizedType(const std::string& annotation, int expectedErrors = 0)
     {
         normalizer.clearCaches();
         CheckResult result = check("type _Res = " + annotation);
-        LUAU_REQUIRE_NO_ERRORS(result);
+        LUAU_REQUIRE_ERROR_COUNT(expectedErrors, result);
 
-        if (FFlag::DebugLuauDeferredConstraintResolution)
+        if (FFlag::LuauSolverV2)
         {
             SourceModule* sourceModule = getMainSourceModule();
             REQUIRE(sourceModule);
@@ -524,7 +478,7 @@ struct NormalizeFixture : Fixture
 
     TypeId normal(const std::string& annotation)
     {
-        const NormalizedType* norm = toNormalizedType(annotation);
+        std::shared_ptr<const NormalizedType> norm = toNormalizedType(annotation);
         REQUIRE(norm);
         return normalizer.typeFromNormal(*norm);
     }
@@ -718,7 +672,7 @@ TEST_CASE_FIXTURE(NormalizeFixture, "negated_function_is_anything_except_a_funct
 
 TEST_CASE_FIXTURE(NormalizeFixture, "specific_functions_cannot_be_negated")
 {
-    CHECK(nullptr == toNormalizedType("Not<(boolean) -> boolean>"));
+    CHECK(nullptr == toNormalizedType("Not<(boolean) -> boolean>", FFlag::LuauSolverV2 ? 1 : 0));
 }
 
 TEST_CASE_FIXTURE(NormalizeFixture, "trivial_intersection_inhabited")
@@ -728,10 +682,10 @@ TEST_CASE_FIXTURE(NormalizeFixture, "trivial_intersection_inhabited")
     TypeId a = arena.addType(FunctionType{builtinTypes->emptyTypePack, builtinTypes->anyTypePack, std::nullopt, false});
     TypeId c = arena.addType(IntersectionType{{a, a}});
 
-    const NormalizedType* n = normalizer.normalize(c);
+    std::shared_ptr<const NormalizedType> n = normalizer.normalize(c);
     REQUIRE(n);
 
-    CHECK(normalizer.isInhabited(n));
+    CHECK(normalizer.isInhabited(n.get()) == NormalizationResult::True);
 }
 
 TEST_CASE_FIXTURE(NormalizeFixture, "bare_negated_boolean")
@@ -757,6 +711,10 @@ TEST_CASE_FIXTURE(Fixture, "higher_order_function")
 
 TEST_CASE_FIXTURE(Fixture, "higher_order_function_with_annotation")
 {
+    // CLI-117088 - Inferring the type of a higher order function with an annotation sometimes doesn't fully constrain the type (there are free types
+    // left over).
+    if (FFlag::LuauSolverV2)
+        return;
     check(R"(
         function apply<a, b>(f: (a) -> b, x)
             return f(x)
@@ -825,7 +783,7 @@ TEST_CASE_FIXTURE(NormalizeFixture, "narrow_union_of_classes_with_intersection")
 
 TEST_CASE_FIXTURE(NormalizeFixture, "intersection_of_metatables_where_the_metatable_is_top_or_bottom")
 {
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2)
         CHECK("{ @metatable *error-type*, {  } }" == toString(normal("Mt<{}, any> & Mt<{}, err>")));
     else
         CHECK("{ @metatable *error-type*, {|  |} }" == toString(normal("Mt<{}, any> & Mt<{}, err>")));
@@ -841,7 +799,7 @@ TEST_CASE_FIXTURE(NormalizeFixture, "recurring_intersection")
     std::optional<TypeId> t = lookupType("B");
     REQUIRE(t);
 
-    const NormalizedType* nt = normalizer.normalize(*t);
+    std::shared_ptr<const NormalizedType> nt = normalizer.normalize(*t);
     REQUIRE(nt);
 
     CHECK("any" == toString(normalizer.typeFromNormal(*nt)));
@@ -854,10 +812,36 @@ TEST_CASE_FIXTURE(NormalizeFixture, "cyclic_union")
     TypeId u = arena.addType(UnionType{{builtinTypes->numberType, t}});
     asMutable(t)->ty.emplace<IntersectionType>(IntersectionType{{builtinTypes->anyType, u}});
 
-    const NormalizedType* nt = normalizer.normalize(t);
+    std::shared_ptr<const NormalizedType> nt = normalizer.normalize(t);
     REQUIRE(nt);
 
     CHECK("number" == toString(normalizer.typeFromNormal(*nt)));
+}
+
+TEST_CASE_FIXTURE(NormalizeFixture, "cyclic_union_of_intersection")
+{
+    // t1 where t1 = (string & t1) | string
+    TypeId boundTy = arena.addType(BlockedType{});
+    TypeId intersectTy = arena.addType(IntersectionType{{builtinTypes->stringType, boundTy}});
+    TypeId unionTy = arena.addType(UnionType{{builtinTypes->stringType, intersectTy}});
+    asMutable(boundTy)->reassign(Type{BoundType{unionTy}});
+
+    std::shared_ptr<const NormalizedType> nt = normalizer.normalize(unionTy);
+
+    CHECK("string" == toString(normalizer.typeFromNormal(*nt)));
+}
+
+TEST_CASE_FIXTURE(NormalizeFixture, "cyclic_intersection_of_unions")
+{
+    // t1 where t1 = (string & t1) | string
+    TypeId boundTy = arena.addType(BlockedType{});
+    TypeId unionTy = arena.addType(UnionType{{builtinTypes->stringType, boundTy}});
+    TypeId intersectionTy = arena.addType(IntersectionType{{builtinTypes->stringType, unionTy}});
+    asMutable(boundTy)->reassign(Type{BoundType{intersectionTy}});
+
+    std::shared_ptr<const NormalizedType> nt = normalizer.normalize(intersectionTy);
+
+    CHECK("string" == toString(normalizer.typeFromNormal(*nt)));
 }
 
 TEST_CASE_FIXTURE(NormalizeFixture, "crazy_metatable")
@@ -873,8 +857,12 @@ TEST_CASE_FIXTURE(NormalizeFixture, "negations_of_classes")
     CHECK("Child" == toString(normal("Not<Parent> & Child")));
     CHECK("((class & ~Parent) | Child | boolean | buffer | function | number | string | table | thread)?" == toString(normal("Not<Parent> | Child")));
     CHECK("(boolean | buffer | function | number | string | table | thread)?" == toString(normal("Not<cls>")));
-    CHECK("(Parent | Unrelated | boolean | buffer | function | number | string | table | thread)?" ==
-          toString(normal("Not<cls & Not<Parent> & Not<Child> & Not<Unrelated>>")));
+    CHECK(
+        "(Parent | Unrelated | boolean | buffer | function | number | string | table | thread)?" ==
+        toString(normal("Not<cls & Not<Parent> & Not<Child> & Not<Unrelated>>"))
+    );
+
+    CHECK("Child" == toString(normal("(Child | Unrelated) & Not<Unrelated>")));
 }
 
 TEST_CASE_FIXTURE(NormalizeFixture, "classes_and_unknown")
@@ -892,7 +880,7 @@ TEST_CASE_FIXTURE(NormalizeFixture, "classes_and_never")
 TEST_CASE_FIXTURE(NormalizeFixture, "top_table_type")
 {
     CHECK("table" == toString(normal("{} | tbl")));
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2)
         CHECK("{  }" == toString(normal("{} & tbl")));
     else
         CHECK("{|  |}" == toString(normal("{} & tbl")));
@@ -901,7 +889,7 @@ TEST_CASE_FIXTURE(NormalizeFixture, "top_table_type")
 
 TEST_CASE_FIXTURE(NormalizeFixture, "negations_of_tables")
 {
-    CHECK(nullptr == toNormalizedType("Not<{}>"));
+    CHECK(nullptr == toNormalizedType("Not<{}>", FFlag::LuauSolverV2 ? 1 : 0));
     CHECK("(boolean | buffer | class | function | number | string | thread)?" == toString(normal("Not<tbl>")));
     CHECK("table" == toString(normal("Not<Not<tbl>>")));
 }
@@ -910,25 +898,25 @@ TEST_CASE_FIXTURE(NormalizeFixture, "normalize_blocked_types")
 {
     Type blocked{BlockedType{}};
 
-    const NormalizedType* norm = normalizer.normalize(&blocked);
+    std::shared_ptr<const NormalizedType> norm = normalizer.normalize(&blocked);
 
     CHECK_EQ(normalizer.typeFromNormal(*norm), &blocked);
 }
 
 TEST_CASE_FIXTURE(NormalizeFixture, "normalize_is_exactly_number")
 {
-    const NormalizedType* number = normalizer.normalize(builtinTypes->numberType);
+    std::shared_ptr<const NormalizedType> number = normalizer.normalize(builtinTypes->numberType);
     // 1. all types for which Types::number say true for, NormalizedType::isExactlyNumber should say true as well
     CHECK(Luau::isNumber(builtinTypes->numberType) == number->isExactlyNumber());
     // 2. isExactlyNumber should handle cases like `number & number`
     TypeId intersection = arena.addType(IntersectionType{{builtinTypes->numberType, builtinTypes->numberType}});
-    const NormalizedType* normIntersection = normalizer.normalize(intersection);
+    std::shared_ptr<const NormalizedType> normIntersection = normalizer.normalize(intersection);
     CHECK(normIntersection->isExactlyNumber());
 
     // 3. isExactlyNumber should reject things that are definitely not precisely numbers `number | any`
 
     TypeId yoonion = arena.addType(UnionType{{builtinTypes->anyType, builtinTypes->numberType}});
-    const NormalizedType* unionIntersection = normalizer.normalize(yoonion);
+    std::shared_ptr<const NormalizedType> unionIntersection = normalizer.normalize(yoonion);
     CHECK(!unionIntersection->isExactlyNumber());
 }
 
@@ -942,7 +930,7 @@ TEST_CASE_FIXTURE(NormalizeFixture, "normalize_unknown")
 
 TEST_CASE_FIXTURE(NormalizeFixture, "read_only_props")
 {
-    ScopedFastFlag sff{FFlag::DebugLuauDeferredConstraintResolution, true};
+    ScopedFastFlag sff{FFlag::LuauSolverV2, true};
 
     CHECK("{ x: string }" == toString(normal("{ read x: string } & { x: string }"), {true}));
     CHECK("{ x: string }" == toString(normal("{ x: string } & { read x: string }"), {true}));
@@ -950,16 +938,200 @@ TEST_CASE_FIXTURE(NormalizeFixture, "read_only_props")
 
 TEST_CASE_FIXTURE(NormalizeFixture, "read_only_props_2")
 {
-    ScopedFastFlag sff{FFlag::DebugLuauDeferredConstraintResolution, true};
+    ScopedFastFlag sff{FFlag::LuauSolverV2, true};
 
-    CHECK(R"({ x: never })" == toString(normal(R"({ x: "hello" } & { x: "world" })"), {true}));
+    CHECK(R"({ x: "hello" })" == toString(normal(R"({ x: "hello" } & { x: string })"), {true}));
+    CHECK(R"(never)" == toString(normal(R"({ x: "hello" } & { x: "world" })"), {true}));
 }
 
 TEST_CASE_FIXTURE(NormalizeFixture, "read_only_props_3")
 {
-    ScopedFastFlag sff{FFlag::DebugLuauDeferredConstraintResolution, true};
+    ScopedFastFlag sff{FFlag::LuauSolverV2, true};
 
-    CHECK("{ read x: never }" == toString(normal(R"({ read x: "hello" } & { read x: "world" })"), {true}));
+    CHECK(R"({ read x: "hello" })" == toString(normal(R"({ read x: "hello" } & { read x: string })"), {true}));
+    CHECK("never" == toString(normal(R"({ read x: "hello" } & { read x: "world" })"), {true}));
+}
+
+TEST_CASE_FIXTURE(NormalizeFixture, "final_types_are_cached")
+{
+    std::shared_ptr<const NormalizedType> na1 = normalizer.normalize(builtinTypes->numberType);
+    std::shared_ptr<const NormalizedType> na2 = normalizer.normalize(builtinTypes->numberType);
+
+    CHECK(na1 == na2);
+}
+
+TEST_CASE_FIXTURE(NormalizeFixture, "non_final_types_can_be_normalized_but_are_not_cached")
+{
+    TypeId a = arena.freshType(&globalScope);
+
+    std::shared_ptr<const NormalizedType> na1 = normalizer.normalize(a);
+    std::shared_ptr<const NormalizedType> na2 = normalizer.normalize(a);
+
+    CHECK(na1 != na2);
+}
+
+TEST_CASE_FIXTURE(NormalizeFixture, "intersect_with_not_unknown")
+{
+    TypeId notUnknown = arena.addType(NegationType{builtinTypes->unknownType});
+    TypeId type = arena.addType(IntersectionType{{builtinTypes->numberType, notUnknown}});
+    std::shared_ptr<const NormalizedType> normalized = normalizer.normalize(type);
+
+    CHECK("never" == toString(normalizer.typeFromNormal(*normalized.get())));
+}
+
+TEST_CASE_FIXTURE(NormalizeFixture, "cyclic_stack_overflow_1")
+{
+    ScopedFastInt sfi{FInt::LuauTypeInferRecursionLimit, 165};
+    this->unifierState.counters.recursionLimit = FInt::LuauTypeInferRecursionLimit;
+    TypeId t1 = arena.addType(TableType{});
+    TypeId t2 = arena.addType(TableType{});
+    TypeId t3 = arena.addType(IntersectionType{{t1, t2}});
+    asMutable(t1)->ty.get_if<TableType>()->props = {{"foo", Property::readonly(t2)}};
+    asMutable(t2)->ty.get_if<TableType>()->props = {{"foo", Property::readonly(t1)}};
+
+    std::shared_ptr<const NormalizedType> normalized = normalizer.normalize(t3);
+    CHECK(normalized);
+}
+
+TEST_CASE_FIXTURE(NormalizeFixture, "cyclic_stack_overflow_2")
+{
+    ScopedFastInt sfi{FInt::LuauTypeInferRecursionLimit, 165};
+    this->unifierState.counters.recursionLimit = FInt::LuauTypeInferRecursionLimit;
+    TypeId t1 = arena.addType(TableType{});
+    TypeId t2 = arena.addType(TableType{});
+    TypeId t3 = arena.addType(IntersectionType{{t1, t2}});
+    asMutable(t1)->ty.get_if<TableType>()->props = {{"foo", Property::readonly(t3)}};
+    asMutable(t2)->ty.get_if<TableType>()->props = {{"foo", Property::readonly(t1)}};
+
+    std::shared_ptr<const NormalizedType> normalized = normalizer.normalize(t3);
+    CHECK(normalized);
+}
+
+TEST_CASE_FIXTURE(NormalizeFixture, "truthy_table_property_and_optional_table_with_optional_prop")
+{
+    ScopedFastFlag sff{FFlag::LuauSolverV2, true};
+
+    // { x: ~(false?) }
+    TypeId t1 = arena.addType(TableType{TableType::Props{{"x", builtinTypes->truthyType}}, std::nullopt, TypeLevel{}, TableState::Sealed});
+
+    // { x: number? }?
+    TypeId t2 = arena.addType(UnionType{
+        {arena.addType(TableType{TableType::Props{{"x", builtinTypes->optionalNumberType}}, std::nullopt, TypeLevel{}, TableState::Sealed}),
+         builtinTypes->nilType}
+    });
+
+    TypeId intersection = arena.addType(IntersectionType{{t2, t1}});
+
+    auto norm = normalizer.normalize(intersection);
+    REQUIRE(norm);
+
+    TypeId ty = normalizer.typeFromNormal(*norm);
+    CHECK("{ x: number }" == toString(ty));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "normalizer_should_be_able_to_detect_cyclic_tables_and_not_stack_overflow")
+{
+    if (!FFlag::LuauSolverV2)
+        return;
+    ScopedFastInt sfi{FInt::LuauTypeInferRecursionLimit, 0};
+    ScopedFastFlag sff{FFlag::LuauNormalizationTracksCyclicPairsThroughInhabitance, true};
+    CheckResult result = check(R"(
+--!strict
+
+type Array<T> = { [number] : T}
+type Object = { [number] : any}
+
+type Set<T> = typeof(setmetatable(
+	{} :: {
+		size: number,
+		-- method definitions
+		add: (self: Set<T>, T) -> Set<T>,
+		clear: (self: Set<T>) -> (),
+		delete: (self: Set<T>, T) -> boolean,
+		has: (self: Set<T>, T) -> boolean,
+		ipairs: (self: Set<T>) -> any,
+	},
+	{} :: {
+		__index: Set<T>,
+		__iter: (self: Set<T>) -> (<K, V>({ [K]: V }, K?) -> (K, V), T),
+	}
+))
+
+type Map<K, V> = typeof(setmetatable(
+	{} :: {
+		size: number,
+		-- method definitions
+		set: (self: Map<K, V>, K, V) -> Map<K, V>,
+		get: (self: Map<K, V>, K) -> V | nil,
+		clear: (self: Map<K, V>) -> (),
+		delete: (self: Map<K, V>, K) -> boolean,
+		[K]: V,
+		has: (self: Map<K, V>, K) -> boolean,
+		keys: (self: Map<K, V>) -> Array<K>,
+		values: (self: Map<K, V>) -> Array<V>,
+		entries: (self: Map<K, V>) -> Array<Tuple<K, V>>,
+		ipairs: (self: Map<K, V>) -> any,
+		_map: { [K]: V },
+		_array: { [number]: K },
+		__index: (self: Map<K, V>, key: K) -> V,
+		__iter: (self: Map<K, V>) -> (<K, V>({ [K]: V }, K?) -> (K?, V), V),
+		__newindex: (self: Map<K, V>, key: K, value: V) -> (),
+	},
+	{} :: {
+		__index: Map<K, V>,
+		__iter: (self: Map<K, V>) -> (<K, V>({ [K]: V }, K?) -> (K, V), V),
+		__newindex: (self: Map<K, V>, key: K, value: V) -> (),
+	}
+))
+type mapFn<T, U> = (element: T, index: number) -> U
+type mapFnWithThisArg<T, U> = (thisArg: any, element: T, index: number) -> U
+
+function fromSet<T, U>(
+	value: Set<T>,
+	mapFn: (mapFn<T, U> | mapFnWithThisArg<T, U>)?,
+	thisArg: Object?
+	-- FIXME Luau: need overloading so the return type on this is more sane and doesn't require manual casts
+): Array<U> | Array<T> | Array<string>
+
+    local array : { [number] : string} = {"foo"}
+	return array
+end
+
+function instanceof(tbl: any, class: any): boolean
+    return true
+end
+
+function fromArray<T, U>(
+	value: Array<T>,
+	mapFn: (mapFn<T, U> | mapFnWithThisArg<T, U>)?,
+	thisArg: Object?
+	-- FIXME Luau: need overloading so the return type on this is more sane and doesn't require manual casts
+): Array<U> | Array<T> | Array<string>
+	local array : {[number] : string} = {}
+	return array
+end
+
+return function<T, U>(
+	value: string | Array<T> | Set<T> | Map<any, any>,
+	mapFn: (mapFn<T, U> | mapFnWithThisArg<T, U>)?,
+	thisArg: Object?
+	-- FIXME Luau: need overloading so the return type on this is more sane and doesn't require manual casts
+): Array<U> | Array<T> | Array<string>
+	if value == nil then
+		error("cannot create array from a nil value")
+	end
+	local array: Array<U> | Array<T> | Array<string>
+
+    if instanceof(value, Set) then
+		array = fromSet(value :: Set<T>, mapFn, thisArg)
+	else
+		array = {}
+	end
+
+
+	return array
+end
+)");
 }
 
 TEST_SUITE_END();

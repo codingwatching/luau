@@ -73,18 +73,27 @@ TEST_CASE_FIXTURE(Fixture, "string_function_indirect")
     CHECK_EQ(*requireType("p"), *builtinTypes->stringType);
 }
 
-TEST_CASE_FIXTURE(Fixture, "CheckMethodsOfNumber")
+TEST_CASE_FIXTURE(Fixture, "check_methods_of_number")
 {
     CheckResult result = check(R"(
-local x: number = 9999
-function x:y(z: number)
-    local s: string = z
-end
-)");
+        local x: number = 9999
+        function x:y(z: number)
+            local s: string = z
+        end
+    )");
 
     LUAU_REQUIRE_ERROR_COUNT(2, result);
-    CHECK_EQ(toString(result.errors[0]), "Cannot add method to non-table type 'number'");
-    CHECK_EQ(toString(result.errors[1]), "Type 'number' could not be converted into 'string'");
+
+    if (FFlag::LuauSolverV2)
+    {
+        CHECK("Expected type table, got 'number' instead" == toString(result.errors[0]));
+        CHECK("Type 'number' could not be converted into 'string'" == toString(result.errors[1]));
+    }
+    else
+    {
+        CHECK_EQ(toString(result.errors[0]), "Cannot add method to non-table type 'number'");
+        CHECK_EQ(toString(result.errors[1]), "Type 'number' could not be converted into 'string'");
+    }
 }
 
 TEST_CASE("singleton_types")
@@ -99,6 +108,46 @@ TEST_CASE("singleton_types")
     CheckResult result = a.check("local s: string = 'hello' local t = s:lower()");
 
     CHECK(result.errors.empty());
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "property_of_buffers")
+{
+    CheckResult result = check(R"(
+        local b = buffer.create(100)
+        print(b.foo)
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "properties_of_vectors")
+{
+    CheckResult result = check(R"(
+        local a = vector.create(1, 2, 3)
+        local b = vector.create(4, 5, 6)
+
+        local t1 = {
+            a + b,
+            a - b,
+            a * 3,
+            a * b,
+            3 * b,
+            a / 3,
+            a / b,
+            3 / b,
+            a // 4,
+            a // b,
+            4 // b,
+            -a,
+        }
+        local t2 = {
+            a.x,
+            a.y,
+            a.z,
+        }
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
 }
 
 TEST_SUITE_END();

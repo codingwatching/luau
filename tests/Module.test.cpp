@@ -2,8 +2,6 @@
 #include "Luau/Clone.h"
 #include "Luau/Common.h"
 #include "Luau/Module.h"
-#include "Luau/Scope.h"
-#include "Luau/RecursionCounter.h"
 #include "Luau/Parser.h"
 
 #include "Fixture.h"
@@ -13,12 +11,10 @@
 
 using namespace Luau;
 
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
-LUAU_FASTFLAG(LuauStacklessTypeClone3)
+LUAU_FASTFLAG(LuauSolverV2);
 LUAU_FASTFLAG(DebugLuauFreezeArena);
 LUAU_FASTINT(LuauTypeCloneIterationLimit);
-LUAU_FASTINT(LuauTypeCloneRecursionLimit);
-
+LUAU_FASTFLAG(LuauOldSolverCreatesChildScopePointers)
 TEST_SUITE_BEGIN("ModuleTests");
 
 TEST_CASE_FIXTURE(Fixture, "is_within_comment")
@@ -114,9 +110,7 @@ TEST_CASE_FIXTURE(Fixture, "deepClone_cyclic_table")
     // breaks this test.  I'm not sure if that behaviour change is important or
     // not, but it's tangental to the core purpose of this test.
 
-    ScopedFastFlag sff[] = {
-        {FFlag::DebugLuauDeferredConstraintResolution, false},
-    };
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
 
     CheckResult result = check(R"(
         local Cyclic = {}
@@ -244,17 +238,31 @@ TEST_CASE_FIXTURE(Fixture, "deepClone_intersection")
 
 TEST_CASE_FIXTURE(Fixture, "clone_class")
 {
-    Type exampleMetaClass{ClassType{"ExampleClassMeta",
+    Type exampleMetaClass{ClassType{
+        "ExampleClassMeta",
         {
             {"__add", {builtinTypes->anyType}},
         },
-        std::nullopt, std::nullopt, {}, {}, "Test"}};
-    Type exampleClass{ClassType{"ExampleClass",
+        std::nullopt,
+        std::nullopt,
+        {},
+        {},
+        "Test",
+        {}
+    }};
+    Type exampleClass{ClassType{
+        "ExampleClass",
         {
             {"PropOne", {builtinTypes->numberType}},
             {"PropTwo", {builtinTypes->stringType}},
         },
-        std::nullopt, &exampleMetaClass, {}, {}, "Test"}};
+        std::nullopt,
+        &exampleMetaClass,
+        {},
+        {},
+        "Test",
+        {}
+    }};
 
     TypeArena dest;
     CloneState cloneState{builtinTypes};
@@ -273,7 +281,7 @@ TEST_CASE_FIXTURE(Fixture, "clone_class")
 
 TEST_CASE_FIXTURE(Fixture, "clone_free_types")
 {
-    ScopedFastFlag sff{FFlag::DebugLuauDeferredConstraintResolution, false};
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
 
     TypeArena arena;
     TypeId freeTy = freshType(NotNull{&arena}, builtinTypes, nullptr);
@@ -306,6 +314,9 @@ TEST_CASE_FIXTURE(Fixture, "clone_free_tables")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "clone_self_property")
 {
+    // CLI-117082 ModuleTests.clone_self_property we don't infer self correctly, instead replacing it with unknown.
+    if (FFlag::LuauSolverV2)
+        return;
     fileResolver.source["Module/A"] = R"(
         --!nonstrict
         local a = {}
@@ -331,47 +342,17 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "clone_self_property")
     CHECK_EQ("This function must be called with self. Did you mean to use a colon instead of a dot?", toString(result.errors[0]));
 }
 
-TEST_CASE_FIXTURE(Fixture, "clone_recursion_limit")
-{
-#if defined(_DEBUG) || defined(_NOOPT)
-    int limit = 250;
-#else
-    int limit = 400;
-#endif
-
-    ScopedFastFlag sff{FFlag::LuauStacklessTypeClone3, false};
-    ScopedFastInt luauTypeCloneRecursionLimit{FInt::LuauTypeCloneRecursionLimit, limit};
-
-    TypeArena src;
-
-    TypeId table = src.addType(TableType{});
-    TypeId nested = table;
-
-    for (int i = 0; i < limit + 100; i++)
-    {
-        TableType* ttv = getMutable<TableType>(nested);
-
-        ttv->props["a"].setType(src.addType(TableType{}));
-        nested = ttv->props["a"].type();
-    }
-
-    TypeArena dest;
-    CloneState cloneState{builtinTypes};
-
-    CHECK_THROWS_AS(clone(table, dest, cloneState), RecursionLimitException);
-}
-
 TEST_CASE_FIXTURE(Fixture, "clone_iteration_limit")
 {
-    ScopedFastFlag sff{FFlag::LuauStacklessTypeClone3, true};
-    ScopedFastInt sfi{FInt::LuauTypeCloneIterationLimit, 500};
+    ScopedFastInt sfi{FInt::LuauTypeCloneIterationLimit, 2000};
 
     TypeArena src;
 
     TypeId table = src.addType(TableType{});
     TypeId nested = table;
 
-    for (int i = 0; i < 2500; i++)
+    int nesting = 2500;
+    for (int i = 0; i < nesting; i++)
     {
         TableType* ttv = getMutable<TableType>(nested);
         ttv->props["a"].setType(src.addType(TableType{}));
@@ -432,7 +413,7 @@ type B = A
     auto it = mod->exportedTypeBindings.find("A");
     REQUIRE(it != mod->exportedTypeBindings.end());
 
-    if (FFlag::DebugLuauDeferredConstraintResolution)
+    if (FFlag::LuauSolverV2)
         CHECK(toString(it->second.type) == "any");
     else
         CHECK(toString(it->second.type) == "*error-type*");
@@ -533,8 +514,6 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "clone_table_bound_to_table_bound_to_table")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "clone_a_bound_type_to_a_persistent_type")
 {
-    ScopedFastFlag sff{FFlag::LuauStacklessTypeClone3, true};
-
     TypeArena arena;
 
     TypeId boundTo = arena.addType(BoundType{builtinTypes->numberType});
@@ -549,8 +528,6 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "clone_a_bound_type_to_a_persistent_type")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "clone_a_bound_typepack_to_a_persistent_typepack")
 {
-    ScopedFastFlag sff{FFlag::LuauStacklessTypeClone3, true};
-
     TypeArena arena;
 
     TypePackId boundTo = arena.addTypePack(BoundTypePack{builtinTypes->neverTypePack});
@@ -561,6 +538,30 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "clone_a_bound_typepack_to_a_persistent_typep
     TypePackId res = clone(boundTo, dest, state);
 
     REQUIRE(res == follow(boundTo));
+}
+
+TEST_CASE_FIXTURE(Fixture, "old_solver_correctly_populates_child_scopes")
+{
+    ScopedFastFlag sff{FFlag::LuauOldSolverCreatesChildScopePointers, true};
+    check(R"(
+--!strict
+if true then
+end
+
+if false then
+end
+
+if true then
+else
+end
+
+local x = {}
+for i,v in x do
+end
+)");
+
+    auto& module = frontend.moduleResolver.getModule("MainModule");
+    CHECK(module->getModuleScope()->children.size() == 7);
 }
 
 TEST_SUITE_END();

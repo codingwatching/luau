@@ -85,12 +85,18 @@ struct Scope
     void inheritAssignments(const ScopePtr& childScope);
     void inheritRefinements(const ScopePtr& childScope);
 
+    // Track globals that should emit warnings during type checking.
+    DenseHashSet<std::string> globalsToWarn{""};
+    bool shouldWarnGlobal(std::string name) const;
+
     // For mutually recursive type aliases, it's important that
     // they use the same types for the same names.
     // For instance, in `type Tree<T> { data: T, children: Forest<T> } type Forest<T> = {Tree<T>}`
     // we need that the generic type `T` in both cases is the same, so we use a cache.
     std::unordered_map<Name, TypeId> typeAliasTypeParameters;
     std::unordered_map<Name, TypePackId> typeAliasTypePackParameters;
+
+    std::optional<std::vector<TypeId>> interiorFreeTypes;
 };
 
 // Returns true iff the left scope encloses the right scope.  A Scope* equal to
@@ -101,5 +107,13 @@ bool subsumesStrict(Scope* left, Scope* right);
 // same scope.  As in subsumesStrict(), nullptr is considered to be the
 // outermost-possible scope.
 bool subsumes(Scope* left, Scope* right);
+
+inline Scope* max(Scope* left, Scope* right)
+{
+    if (subsumes(left, right))
+        return right;
+    else
+        return left;
+}
 
 } // namespace Luau

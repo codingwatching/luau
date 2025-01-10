@@ -1,5 +1,8 @@
 /build/
 /build[.-]*/
+/out
+/cmake/
+/cmake[.-]*/
 /coverage/
 /.vs/
 /.vscode/
@@ -10,5 +13,8 @@
 /luau
 /luau-tests
 /luau-analyze
+/luau-bytecode
 /luau-compile
 __pycache__
+.cache
+.clangd

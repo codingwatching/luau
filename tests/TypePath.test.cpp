@@ -15,17 +15,17 @@
 using namespace Luau;
 using namespace Luau::TypePath;
 
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
+LUAU_FASTFLAG(LuauSolverV2);
 LUAU_DYNAMIC_FASTINT(LuauTypePathMaximumTraverseSteps);
 
 struct TypePathFixture : Fixture
 {
-    ScopedFastFlag sff1{FFlag::DebugLuauDeferredConstraintResolution, true};
+    ScopedFastFlag sff1{FFlag::LuauSolverV2, true};
 };
 
 struct TypePathBuiltinsFixture : BuiltinsFixture
 {
-    ScopedFastFlag sff1{FFlag::DebugLuauDeferredConstraintResolution, true};
+    ScopedFastFlag sff1{FFlag::LuauSolverV2, true};
 };
 
 TEST_SUITE_BEGIN("TypePathManipulation");
@@ -235,6 +235,23 @@ TEST_CASE_FIXTURE(ClassFixture, "metatables")
     }
 
     SUBCASE("table")
+    {
+        TYPESOLVE_CODE(R"(
+            type Table = { foo: number }
+            type Metatable = { bar: number }
+            local tbl: Table = { foo = 123 }
+            local mt: Metatable = { bar = 456 }
+            local res = setmetatable(tbl, mt)
+        )");
+
+        // Tricky test setup because 'setmetatable' mutates the argument 'tbl' type
+        auto result = traverseForType(requireType("res"), Path(TypeField::Table), builtinTypes);
+        auto expected = lookupType("Table");
+        REQUIRE(expected);
+        CHECK(result == follow(*expected));
+    }
+
+    SUBCASE("metatable")
     {
         TYPESOLVE_CODE(R"(
             local mt = { foo = 123 }
@@ -521,9 +538,7 @@ TEST_SUITE_BEGIN("TypePathToString");
 
 TEST_CASE("field")
 {
-    ScopedFastFlag sff[] = {
-        {FFlag::DebugLuauDeferredConstraintResolution, false},
-    };
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
 
     CHECK(toString(PathBuilder().prop("foo").build()) == R"(["foo"])");
 }
@@ -550,9 +565,7 @@ TEST_CASE("empty_path")
 
 TEST_CASE("prop")
 {
-    ScopedFastFlag sff[] = {
-        {FFlag::DebugLuauDeferredConstraintResolution, false},
-    };
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
 
     Path p = PathBuilder().prop("foo").build();
     CHECK(p == Path(TypePath::Property{"foo"}));
@@ -592,10 +605,12 @@ TEST_CASE("fields")
 
 TEST_CASE("chained")
 {
-    ScopedFastFlag sff{FFlag::DebugLuauDeferredConstraintResolution, true};
+    ScopedFastFlag sff{FFlag::LuauSolverV2, true};
 
-    CHECK(PathBuilder().index(0).readProp("foo").mt().readProp("bar").args().index(1).build() ==
-          Path({Index{0}, TypePath::Property::read("foo"), TypeField::Metatable, TypePath::Property::read("bar"), PackField::Arguments, Index{1}}));
+    CHECK(
+        PathBuilder().index(0).readProp("foo").mt().readProp("bar").args().index(1).build() ==
+        Path({Index{0}, TypePath::Property::read("foo"), TypeField::Metatable, TypePath::Property::read("bar"), PackField::Arguments, Index{1}})
+    );
 }
 
 TEST_SUITE_END(); // TypePathBuilder

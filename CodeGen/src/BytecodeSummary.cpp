@@ -56,7 +56,7 @@ std::vector<FunctionBytecodeSummary> summarizeBytecode(lua_State* L, int idx, un
     Proto* root = clvalue(func)->l.p;
 
     std::vector<Proto*> protos;
-    gatherFunctions(protos, root, CodeGen_ColdFunctions);
+    gatherFunctions(protos, root, CodeGen_ColdFunctions, root->flags & LPF_NATIVE_FUNCTION);
 
     std::vector<FunctionBytecodeSummary> summaries;
     summaries.reserve(protos.size());

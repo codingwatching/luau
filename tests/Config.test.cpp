@@ -25,12 +25,14 @@ TEST_CASE("language_mode")
 TEST_CASE("disable_a_lint_rule")
 {
     Config config;
-    auto err = parseConfig(R"(
+    auto err = parseConfig(
+        R"(
         {"lint": {
             "UnknownGlobal": false,
         }}
     )",
-        config);
+        config
+    );
     REQUIRE(!err);
 
     CHECK(!config.enabledLint.isEnabled(LintWarning::Code_UnknownGlobal));
@@ -40,12 +42,14 @@ TEST_CASE("disable_a_lint_rule")
 TEST_CASE("report_a_syntax_error")
 {
     Config config;
-    auto err = parseConfig(R"(
+    auto err = parseConfig(
+        R"(
         {"lint": {
             "UnknownGlobal": "oops"
         }}
     )",
-        config);
+        config
+    );
 
     REQUIRE(err);
     CHECK_EQ("In key UnknownGlobal: Bad setting 'oops'.  Valid options are true and false", *err);
@@ -54,7 +58,11 @@ TEST_CASE("report_a_syntax_error")
 TEST_CASE("noinfer_is_still_allowed")
 {
     Config config;
-    auto err = parseConfig(R"( {"language": {"mode": "noinfer"}} )", config, true);
+
+    ConfigOptions opts;
+    opts.compat = true;
+
+    auto err = parseConfig(R"( {"language": {"mode": "noinfer"}} )", config, opts);
     REQUIRE(!err);
 
     CHECK_EQ(int(Luau::Mode::NoCheck), int(config.mode));
@@ -79,7 +87,8 @@ TEST_CASE("lint_warnings_are_ordered")
 TEST_CASE("comments")
 {
     Config config;
-    auto err = parseConfig(R"(
+    auto err = parseConfig(
+        R"(
 {
     "lint": {
         "*": false,
@@ -92,7 +101,8 @@ TEST_CASE("comments")
     }
 }
 )",
-        config);
+        config
+    );
     REQUIRE(!err);
 
     CHECK(!config.enabledLint.isEnabled(LintWarning::Code_LocalShadow));
@@ -105,13 +115,15 @@ TEST_CASE("issue_severity")
     CHECK(!config.lintErrors);
     CHECK(config.typeErrors);
 
-    auto err = parseConfig(R"(
+    auto err = parseConfig(
+        R"(
 {
     "lintErrors": true,
     "typeErrors": false,
 }
 )",
-        config);
+        config
+    );
     REQUIRE(!err);
 
     CHECK(config.lintErrors);
@@ -121,12 +133,14 @@ TEST_CASE("issue_severity")
 TEST_CASE("extra_globals")
 {
     Config config;
-    auto err = parseConfig(R"(
+    auto err = parseConfig(
+        R"(
 {
     "globals": ["it", "__DEV__"],
 }
 )",
-        config);
+        config
+    );
     REQUIRE(!err);
 
     REQUIRE(config.globals.size() == 2);
@@ -137,14 +151,21 @@ TEST_CASE("extra_globals")
 TEST_CASE("lint_rules_compat")
 {
     Config config;
-    auto err = parseConfig(R"(
+
+    ConfigOptions opts;
+    opts.compat = true;
+
+    auto err = parseConfig(
+        R"(
         {"lint": {
             "SameLineStatement": "enabled",
             "FunctionUnused": "disabled",
             "ImportUnused": "fatal",
         }}
     )",
-        config, true);
+        config,
+        opts
+    );
     REQUIRE(!err);
 
     CHECK(config.enabledLint.isEnabled(LintWarning::Code_SameLineStatement));

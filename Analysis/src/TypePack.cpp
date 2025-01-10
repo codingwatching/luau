@@ -6,9 +6,7 @@
 
 #include <stdexcept>
 
-LUAU_FASTFLAGVARIABLE(LuauFollowEmptyTypePacks, false);
-
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
+LUAU_FASTFLAG(LuauSolverV2);
 
 namespace Luau
 {
@@ -259,20 +257,25 @@ bool areEqual(SeenSet& seen, const TypePackVar& lhs, const TypePackVar& rhs)
 
 TypePackId follow(TypePackId tp)
 {
-    return follow(tp, nullptr, [](const void*, TypePackId t) {
-        return t;
-    });
+    return follow(
+        tp,
+        nullptr,
+        [](const void*, TypePackId t)
+        {
+            return t;
+        }
+    );
 }
 
 TypePackId follow(TypePackId tp, const void* context, TypePackId (*mapper)(const void*, TypePackId))
 {
-    auto advance = [context, mapper](TypePackId ty) -> std::optional<TypePackId> {
+    auto advance = [context, mapper](TypePackId ty) -> std::optional<TypePackId>
+    {
         TypePackId mapped = mapper(context, ty);
 
         if (const Unifiable::Bound<TypePackId>* btv = get<Unifiable::Bound<TypePackId>>(mapped))
             return btv->boundTo;
-        else if (const TypePack* tp = get<TypePack>(mapped);
-                 (FFlag::DebugLuauDeferredConstraintResolution || FFlag::LuauFollowEmptyTypePacks) && tp && tp->head.empty())
+        else if (const TypePack* tp = get<TypePack>(mapped); tp && tp->head.empty())
             return tp->tail;
         else
             return std::nullopt;
@@ -466,6 +469,13 @@ bool containsNever(TypePackId tp)
     }
 
     return false;
+}
+
+template<>
+LUAU_NOINLINE Unifiable::Bound<TypePackId>* emplaceTypePack<BoundTypePack>(TypePackVar* ty, TypePackId& tyArg)
+{
+    LUAU_ASSERT(ty != follow(tyArg));
+    return &ty->ty.emplace<BoundTypePack>(tyArg);
 }
 
 } // namespace Luau

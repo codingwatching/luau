@@ -6,7 +6,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 
-LUAU_FASTFLAGVARIABLE(LuauCache32BitAsmConsts, false)
+LUAU_FASTFLAG(LuauVectorLibNativeDot);
 
 namespace Luau
 {
@@ -17,21 +17,22 @@ namespace X64
 
 // TODO: more assertions on operand sizes
 
-static const uint8_t codeForCondition[] = {
-    0x0, 0x1, 0x2, 0x3, 0x2, 0x6, 0x7, 0x3, 0x4, 0xc, 0xe, 0xf, 0xd, 0x3, 0x7, 0x6, 0x2, 0x5, 0xd, 0xf, 0xe, 0xc, 0x4, 0x5, 0xa, 0xb};
+static const uint8_t codeForCondition[] = {0x0, 0x1, 0x2, 0x3, 0x2, 0x6, 0x7, 0x3, 0x4, 0xc, 0xe, 0xf, 0xd,
+                                           0x3, 0x7, 0x6, 0x2, 0x5, 0xd, 0xf, 0xe, 0xc, 0x4, 0x5, 0xa, 0xb};
 static_assert(sizeof(codeForCondition) / sizeof(codeForCondition[0]) == size_t(ConditionX64::Count), "all conditions have to be covered");
 
-static const char* jccTextForCondition[] = {"jo", "jno", "jc", "jnc", "jb", "jbe", "ja", "jae", "je", "jl", "jle", "jg", "jge", "jnb", "jnbe", "jna",
-    "jnae", "jne", "jnl", "jnle", "jng", "jnge", "jz", "jnz", "jp", "jnp"};
+static const char* jccTextForCondition[] = {"jo",  "jno",  "jc",  "jnc",  "jb",  "jbe", "ja",   "jae", "je",   "jl", "jle", "jg", "jge",
+                                            "jnb", "jnbe", "jna", "jnae", "jne", "jnl", "jnle", "jng", "jnge", "jz", "jnz", "jp", "jnp"};
 static_assert(sizeof(jccTextForCondition) / sizeof(jccTextForCondition[0]) == size_t(ConditionX64::Count), "all conditions have to be covered");
 
-static const char* setccTextForCondition[] = {"seto", "setno", "setc", "setnc", "setb", "setbe", "seta", "setae", "sete", "setl", "setle", "setg",
-    "setge", "setnb", "setnbe", "setna", "setnae", "setne", "setnl", "setnle", "setng", "setnge", "setz", "setnz", "setp", "setnp"};
+static const char* setccTextForCondition[] = {"seto",  "setno",  "setc",  "setnc",  "setb",  "setbe",  "seta",  "setae",  "sete",
+                                              "setl",  "setle",  "setg",  "setge",  "setnb", "setnbe", "setna", "setnae", "setne",
+                                              "setnl", "setnle", "setng", "setnge", "setz",  "setnz",  "setp",  "setnp"};
 static_assert(sizeof(setccTextForCondition) / sizeof(setccTextForCondition[0]) == size_t(ConditionX64::Count), "all conditions have to be covered");
 
-static const char* cmovTextForCondition[] = {"cmovo", "cmovno", "cmovc", "cmovnc", "cmovb", "cmovbe", "cmova", "cmovae", "cmove", "cmovl", "cmovle",
-    "cmovg", "cmovge", "cmovnb", "cmovnbe", "cmovna", "cmovnae", "cmovne", "cmovnl", "cmovnle", "cmovng", "cmovnge", "cmovz", "cmovnz", "cmovp",
-    "cmovnp"};
+static const char* cmovTextForCondition[] = {"cmovo",  "cmovno",  "cmovc",  "cmovnc",  "cmovb",  "cmovbe",  "cmova",  "cmovae",  "cmove",
+                                             "cmovl",  "cmovle",  "cmovg",  "cmovge",  "cmovnb", "cmovnbe", "cmovna", "cmovnae", "cmovne",
+                                             "cmovnl", "cmovnle", "cmovng", "cmovnge", "cmovz",  "cmovnz",  "cmovp",  "cmovnp"};
 static_assert(sizeof(cmovTextForCondition) / sizeof(cmovTextForCondition[0]) == size_t(ConditionX64::Count), "all conditions have to be covered");
 
 #define OP_PLUS_REG(op, reg) ((op) + (reg & 0x7))
@@ -52,8 +53,8 @@ static_assert(sizeof(cmovTextForCondition) / sizeof(cmovTextForCondition[0]) == 
 #define AVX_3_2(r, x, b, m) (AVX_R(r) | AVX_X(x) | AVX_B(b) | (m))
 #define AVX_3_3(w, v, l, p) (AVX_W(w) | ((~(v.index) & 0xf) << 3) | ((l) << 2) | (p))
 
-#define MOD_RM(mod, reg, rm) (((mod) << 6) | (((reg)&0x7) << 3) | ((rm)&0x7))
-#define SIB(scale, index, base) ((getScaleEncoding(scale) << 6) | (((index)&0x7) << 3) | ((base)&0x7))
+#define MOD_RM(mod, reg, rm) (((mod) << 6) | (((reg) & 0x7) << 3) | ((rm) & 0x7))
+#define SIB(scale, index, base) ((getScaleEncoding(scale) << 6) | (((index) & 0x7) << 3) | ((base) & 0x7))
 
 const unsigned AVX_0F = 0b0001;
 [[maybe_unused]] const unsigned AVX_0F38 = 0b0010;
@@ -828,7 +829,7 @@ void AssemblyBuilderX64::vcvtss2sd(OperandX64 dst, OperandX64 src1, OperandX64 s
     else
         CODEGEN_ASSERT(src2.memSize == SizeX64::dword);
 
-    placeAvx("vcvtsd2ss", dst, src1, src2, 0x5a, false, AVX_0F, AVX_F3);
+    placeAvx("vcvtss2sd", dst, src1, src2, 0x5a, false, AVX_0F, AVX_F3);
 }
 
 void AssemblyBuilderX64::vroundsd(OperandX64 dst, OperandX64 src1, OperandX64 src2, RoundingModeX64 roundingMode)
@@ -947,6 +948,12 @@ void AssemblyBuilderX64::vpinsrd(RegisterX64 dst, RegisterX64 src1, OperandX64 s
     placeAvx("vpinsrd", dst, src1, src2, offset, 0x22, false, AVX_0F3A, AVX_66);
 }
 
+void AssemblyBuilderX64::vdpps(OperandX64 dst, OperandX64 src1, OperandX64 src2, uint8_t mask)
+{
+    LUAU_ASSERT(FFlag::LuauVectorLibNativeDot);
+    placeAvx("vdpps", dst, src1, src2, mask, 0x40, false, AVX_0F3A, AVX_66);
+}
+
 bool AssemblyBuilderX64::finalize()
 {
     code.resize(codePos - code.data());
@@ -1041,33 +1048,24 @@ OperandX64 AssemblyBuilderX64::i64(int64_t value)
 
 OperandX64 AssemblyBuilderX64::f32(float value)
 {
-    if (FFlag::LuauCache32BitAsmConsts)
+    uint32_t as32BitKey;
+    static_assert(sizeof(as32BitKey) == sizeof(value), "Expecting float to be 32-bit");
+    memcpy(&as32BitKey, &value, sizeof(value));
+
+    if (as32BitKey != ~0u)
     {
-        uint32_t as32BitKey;
-        static_assert(sizeof(as32BitKey) == sizeof(value), "Expecting float to be 32-bit");
-        memcpy(&as32BitKey, &value, sizeof(value));
-
-        if (as32BitKey != ~0u)
-        {
-            if (int32_t* prev = constCache32.find(as32BitKey))
-                return OperandX64(SizeX64::dword, noreg, 1, rip, *prev);
-        }
-
-        size_t pos = allocateData(4, 4);
-        writef32(&data[pos], value);
-        int32_t offset = int32_t(pos - data.size());
-
-        if (as32BitKey != ~0u)
-            constCache32[as32BitKey] = offset;
-
-        return OperandX64(SizeX64::dword, noreg, 1, rip, offset);
+        if (int32_t* prev = constCache32.find(as32BitKey))
+            return OperandX64(SizeX64::dword, noreg, 1, rip, *prev);
     }
-    else
-    {
-        size_t pos = allocateData(4, 4);
-        writef32(&data[pos], value);
-        return OperandX64(SizeX64::dword, noreg, 1, rip, int32_t(pos - data.size()));
-    }
+
+    size_t pos = allocateData(4, 4);
+    writef32(&data[pos], value);
+    int32_t offset = int32_t(pos - data.size());
+
+    if (as32BitKey != ~0u)
+        constCache32[as32BitKey] = offset;
+
+    return OperandX64(SizeX64::dword, noreg, 1, rip, offset);
 }
 
 OperandX64 AssemblyBuilderX64::f64(double value)
@@ -1147,8 +1145,19 @@ unsigned AssemblyBuilderX64::getInstructionCount() const
     return instructionCount;
 }
 
-void AssemblyBuilderX64::placeBinary(const char* name, OperandX64 lhs, OperandX64 rhs, uint8_t codeimm8, uint8_t codeimm, uint8_t codeimmImm8,
-    uint8_t code8rev, uint8_t coderev, uint8_t code8, uint8_t code, uint8_t opreg)
+void AssemblyBuilderX64::placeBinary(
+    const char* name,
+    OperandX64 lhs,
+    OperandX64 rhs,
+    uint8_t codeimm8,
+    uint8_t codeimm,
+    uint8_t codeimmImm8,
+    uint8_t code8rev,
+    uint8_t coderev,
+    uint8_t code8,
+    uint8_t code,
+    uint8_t opreg
+)
 {
     if (logText)
         log(name, lhs, rhs);
@@ -1303,7 +1312,15 @@ void AssemblyBuilderX64::placeAvx(const char* name, OperandX64 dst, OperandX64 s
 }
 
 void AssemblyBuilderX64::placeAvx(
-    const char* name, OperandX64 dst, OperandX64 src, uint8_t code, uint8_t coderev, bool setW, uint8_t mode, uint8_t prefix)
+    const char* name,
+    OperandX64 dst,
+    OperandX64 src,
+    uint8_t code,
+    uint8_t coderev,
+    bool setW,
+    uint8_t mode,
+    uint8_t prefix
+)
 {
     CODEGEN_ASSERT((dst.cat == CategoryX64::mem && src.cat == CategoryX64::reg) || (dst.cat == CategoryX64::reg && src.cat == CategoryX64::mem));
 
@@ -1327,7 +1344,15 @@ void AssemblyBuilderX64::placeAvx(
 }
 
 void AssemblyBuilderX64::placeAvx(
-    const char* name, OperandX64 dst, OperandX64 src1, OperandX64 src2, uint8_t code, bool setW, uint8_t mode, uint8_t prefix)
+    const char* name,
+    OperandX64 dst,
+    OperandX64 src1,
+    OperandX64 src2,
+    uint8_t code,
+    bool setW,
+    uint8_t mode,
+    uint8_t prefix
+)
 {
     CODEGEN_ASSERT(dst.cat == CategoryX64::reg);
     CODEGEN_ASSERT(src1.cat == CategoryX64::reg);
@@ -1343,8 +1368,8 @@ void AssemblyBuilderX64::placeAvx(
     commit();
 }
 
-void AssemblyBuilderX64::placeAvx(
-    const char* name, OperandX64 dst, OperandX64 src1, OperandX64 src2, uint8_t imm8, uint8_t code, bool setW, uint8_t mode, uint8_t prefix)
+void AssemblyBuilderX64::
+    placeAvx(const char* name, OperandX64 dst, OperandX64 src1, OperandX64 src2, uint8_t imm8, uint8_t code, bool setW, uint8_t mode, uint8_t prefix)
 {
     CODEGEN_ASSERT(dst.cat == CategoryX64::reg);
     CODEGEN_ASSERT(src1.cat == CategoryX64::reg);
@@ -1746,13 +1771,15 @@ const char* AssemblyBuilderX64::getSizeName(SizeX64 size) const
 
 const char* AssemblyBuilderX64::getRegisterName(RegisterX64 reg) const
 {
-    static const char* names[][16] = {{"rip", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""},
+    static const char* names[][16] = {
+        {"rip", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""},
         {"al", "cl", "dl", "bl", "spl", "bpl", "sil", "dil", "r8b", "r9b", "r10b", "r11b", "r12b", "r13b", "r14b", "r15b"},
         {"ax", "cx", "dx", "bx", "sp", "bp", "si", "di", "r8w", "r9w", "r10w", "r11w", "r12w", "r13w", "r14w", "r15w"},
         {"eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi", "r8d", "r9d", "r10d", "r11d", "r12d", "r13d", "r14d", "r15d"},
         {"rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"},
         {"xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15"},
-        {"ymm0", "ymm1", "ymm2", "ymm3", "ymm4", "ymm5", "ymm6", "ymm7", "ymm8", "ymm9", "ymm10", "ymm11", "ymm12", "ymm13", "ymm14", "ymm15"}};
+        {"ymm0", "ymm1", "ymm2", "ymm3", "ymm4", "ymm5", "ymm6", "ymm7", "ymm8", "ymm9", "ymm10", "ymm11", "ymm12", "ymm13", "ymm14", "ymm15"}
+    };
 
     CODEGEN_ASSERT(reg.index < 16);
     CODEGEN_ASSERT(reg.size <= SizeX64::ymmword);

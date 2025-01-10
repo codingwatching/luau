@@ -18,7 +18,7 @@
 using namespace Luau;
 
 LUAU_FASTINT(LuauTypeInferRecursionLimit)
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution)
+LUAU_FASTFLAG(LuauSolverV2)
 
 struct LimitFixture : BuiltinsFixture
 {
@@ -30,9 +30,14 @@ struct LimitFixture : BuiltinsFixture
 template<typename T>
 bool hasError(const CheckResult& result, T* = nullptr)
 {
-    auto it = std::find_if(result.errors.begin(), result.errors.end(), [](const TypeError& a) {
-        return nullptr != get<T>(a);
-    });
+    auto it = std::find_if(
+        result.errors.begin(),
+        result.errors.end(),
+        [](const TypeError& a)
+        {
+            return nullptr != get<T>(a);
+        }
+    );
     return it != result.errors.end();
 }
 
@@ -40,9 +45,7 @@ TEST_SUITE_BEGIN("RuntimeLimits");
 
 TEST_CASE_FIXTURE(LimitFixture, "typescript_port_of_Result_type")
 {
-    ScopedFastFlag sff[] = {
-        {FFlag::DebugLuauDeferredConstraintResolution, false},
-    };
+    DOES_NOT_PASS_NEW_SOLVER_GUARD();
 
     constexpr const char* src = R"LUA(
         --!strict

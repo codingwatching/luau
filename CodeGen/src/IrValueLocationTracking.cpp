@@ -3,8 +3,6 @@
 
 #include "Luau/IrUtils.h"
 
-LUAU_DYNAMIC_FASTFLAGVARIABLE(LuauCodegenTrackingMultilocationFix, false)
-
 namespace Luau
 {
 namespace CodeGen
@@ -46,11 +44,11 @@ void IrValueLocationTracking::beforeInstLowering(IrInst& inst)
         invalidateRestoreVmRegs(vmRegOp(inst.a), -1);
         break;
     case IrCmd::FASTCALL:
-        invalidateRestoreVmRegs(vmRegOp(inst.b), function.intOp(inst.f));
+        invalidateRestoreVmRegs(vmRegOp(inst.b), function.intOp(inst.d));
         break;
     case IrCmd::INVOKE_FASTCALL:
         // Multiple return sequences (count == -1) are defined by ADJUST_STACK_TO_REG
-        if (int count = function.intOp(inst.f); count != -1)
+        if (int count = function.intOp(inst.g); count != -1)
             invalidateRestoreVmRegs(vmRegOp(inst.b), count);
         break;
     case IrCmd::DO_ARITH:
@@ -148,6 +146,7 @@ void IrValueLocationTracking::beforeInstLowering(IrInst& inst)
         CODEGEN_ASSERT(inst.d.kind != IrOpKind::VmReg);
         CODEGEN_ASSERT(inst.e.kind != IrOpKind::VmReg);
         CODEGEN_ASSERT(inst.f.kind != IrOpKind::VmReg);
+        CODEGEN_ASSERT(inst.g.kind != IrOpKind::VmReg);
         break;
     }
 }
@@ -161,7 +160,7 @@ void IrValueLocationTracking::afterInstLowering(IrInst& inst, uint32_t instIdx)
     case IrCmd::LOAD_DOUBLE:
     case IrCmd::LOAD_INT:
     case IrCmd::LOAD_TVALUE:
-        if (DFFlag::LuauCodegenTrackingMultilocationFix && inst.a.kind == IrOpKind::VmReg)
+        if (inst.a.kind == IrOpKind::VmReg)
             invalidateRestoreOp(inst.a, /*skipValueInvalidation*/ false);
 
         recordRestoreOp(instIdx, inst.a);

@@ -11,7 +11,7 @@
 #include "Luau/TypeInfer.h"
 #include "Luau/TypePack.h"
 #include "Luau/Type.h"
-#include "Luau/TypeFamily.h"
+#include "Luau/TypeFunction.h"
 #include "Luau/VisitType.h"
 #include "Luau/TypeOrPack.h"
 
@@ -19,9 +19,8 @@
 #include <stdexcept>
 #include <string>
 
-LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution)
-LUAU_FASTFLAGVARIABLE(LuauToStringPrettifyLocation, false)
-LUAU_FASTFLAGVARIABLE(LuauToStringSimpleCompositeTypesSingleLine, false)
+LUAU_FASTFLAG(LuauSolverV2)
+LUAU_FASTFLAGVARIABLE(LuauSyntheticErrors)
 
 /*
  * Enables increasing levels of verbosity for Luau type names when stringifying.
@@ -40,7 +39,7 @@ LUAU_FASTFLAGVARIABLE(LuauToStringSimpleCompositeTypesSingleLine, false)
  * 3: Suffix free/generic types with their scope pointer, if present.
  */
 LUAU_FASTINTVARIABLE(DebugLuauVerboseTypeNames, 0)
-LUAU_FASTFLAGVARIABLE(DebugLuauToStringNoLexicalSort, false)
+LUAU_FASTFLAGVARIABLE(DebugLuauToStringNoLexicalSort)
 
 namespace Luau
 {
@@ -85,10 +84,10 @@ struct FindCyclicTypes final : TypeVisitor
         if (!visited.insert(ty))
             return false;
 
-        if (FFlag::DebugLuauDeferredConstraintResolution)
+        if (FFlag::LuauSolverV2)
         {
             // TODO: Replace these if statements with assert()s when we
-            // delete FFlag::DebugLuauDeferredConstraintResolution.
+            // delete FFlag::LuauSolverV2.
             //
             // When the old solver is used, these pointers are always
             // unused. When the new solver is used, they are never null.
@@ -98,16 +97,6 @@ struct FindCyclicTypes final : TypeVisitor
             if (ft.upperBound)
                 traverse(ft.upperBound);
         }
-
-        return false;
-    }
-
-    bool visit(TypeId ty, const LocalType& lt) override
-    {
-        if (!visited.insert(ty))
-            return false;
-
-        traverse(lt.domain);
 
         return false;
     }
@@ -180,7 +169,8 @@ struct StringifierState
     DenseHashMap<TypeId, std::string> cycleNames{{}};
     DenseHashMap<TypePackId, std::string> cycleTpNames{{}};
     Set<void*> seen{{}};
-    // `$$$` was chosen as the tombstone for `usedNames` since it is not a valid name syntactically and is relatively short for string comparison reasons.
+    // `$$$` was chosen as the tombstone for `usedNames` since it is not a valid name syntactically and is relatively short for string comparison
+    // reasons.
     DenseHashSet<std::string> usedNames{"$$$"};
     size_t indentation = 0;
 
@@ -368,10 +358,12 @@ struct TypeStringifier
         }
 
         Luau::visit(
-            [this, tv](auto&& t) {
+            [this, tv](auto&& t)
+            {
                 return (*this)(tv, t);
             },
-            tv->ty);
+            tv->ty
+        );
     }
 
     void emitKey(const std::string& name)
@@ -420,7 +412,7 @@ struct TypeStringifier
 
     void stringify(const std::string& name, const Property& prop)
     {
-        if (FFlag::DebugLuauDeferredConstraintResolution)
+        if (FFlag::LuauSolverV2)
             return _newStringify(name, prop);
 
         emitKey(name);
@@ -482,7 +474,7 @@ struct TypeStringifier
 
         // TODO: ftv.lowerBound and ftv.upperBound should always be non-nil when
         // the new solver is used. This can be replaced with an assert.
-        if (FFlag::DebugLuauDeferredConstraintResolution && ftv.lowerBound && ftv.upperBound)
+        if (FFlag::LuauSolverV2 && ftv.lowerBound && ftv.upperBound)
         {
             const TypeId lowerBound = follow(ftv.lowerBound);
             const TypeId upperBound = follow(ftv.upperBound);
@@ -520,26 +512,11 @@ struct TypeStringifier
         if (FInt::DebugLuauVerboseTypeNames >= 2)
         {
             state.emit("-");
-            if (FFlag::DebugLuauDeferredConstraintResolution)
+            if (FFlag::LuauSolverV2)
                 state.emitLevel(ftv.scope);
             else
                 state.emit(ftv.level);
         }
-    }
-
-    void operator()(TypeId ty, const LocalType& lt)
-    {
-        state.emit("l-");
-        state.emit(lt.name);
-        if (FInt::DebugLuauVerboseTypeNames >= 1)
-        {
-            state.emit("[");
-            state.emit(lt.blockCount);
-            state.emit("]");
-        }
-        state.emit("=[");
-        stringify(lt.domain);
-        state.emit("]");
     }
 
     void operator()(TypeId, const BoundType& btv)
@@ -564,7 +541,7 @@ struct TypeStringifier
         if (FInt::DebugLuauVerboseTypeNames >= 2)
         {
             state.emit("-");
-            if (FFlag::DebugLuauDeferredConstraintResolution)
+            if (FFlag::LuauSolverV2)
                 state.emitLevel(gtv.scope);
             else
                 state.emit(gtv.level);
@@ -667,7 +644,7 @@ struct TypeStringifier
             state.emit(">");
         }
 
-        if (FFlag::DebugLuauDeferredConstraintResolution)
+        if (FFlag::LuauSolverV2)
         {
             if (ftv.isCheckedFunction)
                 state.emit("@checked ");
@@ -750,10 +727,10 @@ struct TypeStringifier
 
         std::string openbrace = "@@@";
         std::string closedbrace = "@@@?!";
-        switch (state.opts.hideTableKind ? (FFlag::DebugLuauDeferredConstraintResolution ? TableState::Sealed : TableState::Unsealed) : ttv.state)
+        switch (state.opts.hideTableKind ? (FFlag::LuauSolverV2 ? TableState::Sealed : TableState::Unsealed) : ttv.state)
         {
         case TableState::Sealed:
-            if (FFlag::DebugLuauDeferredConstraintResolution)
+            if (FFlag::LuauSolverV2)
             {
                 openbrace = "{";
                 closedbrace = "}";
@@ -766,7 +743,7 @@ struct TypeStringifier
             }
             break;
         case TableState::Unsealed:
-            if (FFlag::DebugLuauDeferredConstraintResolution)
+            if (FFlag::LuauSolverV2)
             {
                 state.result.invalid = true;
                 openbrace = "{|";
@@ -880,6 +857,11 @@ struct TypeStringifier
         state.emit("any");
     }
 
+    void operator()(TypeId, const NoRefineType&)
+    {
+        state.emit("*no-refine*");
+    }
+
     void operator()(TypeId, const UnionType& uv)
     {
         if (state.hasSeen(&uv))
@@ -889,6 +871,8 @@ struct TypeStringifier
             return;
         }
 
+        LUAU_ASSERT(uv.options.size() > 1);
+
         bool optional = false;
         bool hasNonNilDisjunct = false;
 
@@ -897,7 +881,7 @@ struct TypeStringifier
         {
             el = follow(el);
 
-            if (isNil(el))
+            if (state.opts.useQuestionMarks && isNil(el))
             {
                 optional = true;
                 continue;
@@ -1015,7 +999,15 @@ struct TypeStringifier
     void operator()(TypeId, const ErrorType& tv)
     {
         state.result.error = true;
-        state.emit("*error-type*");
+
+        if (FFlag::LuauSyntheticErrors && tv.synthetic)
+        {
+            state.emit("*error-type<");
+            stringify(*tv.synthetic);
+            state.emit(">*");
+        }
+        else
+            state.emit("*error-type*");
     }
 
     void operator()(TypeId, const LazyType& ltv)
@@ -1058,9 +1050,13 @@ struct TypeStringifier
             state.emit(")");
     }
 
-    void operator()(TypeId, const TypeFamilyInstanceType& tfitv)
+    void operator()(TypeId, const TypeFunctionInstanceType& tfitv)
     {
-        state.emit(tfitv.family->name);
+        if (tfitv.userFuncName) // Special stringification for user-defined type functions
+            state.emit(tfitv.userFuncName->value);
+        else
+            state.emit(tfitv.function->name);
+
         state.emit("<");
 
         bool comma = false;
@@ -1131,10 +1127,12 @@ struct TypePackStringifier
         }
 
         Luau::visit(
-            [this, tp](auto&& t) {
+            [this, tp](auto&& t)
+            {
                 return (*this)(tp, t);
             },
-            tp->ty);
+            tp->ty
+        );
     }
 
     void operator()(TypePackId, const TypePack& tp)
@@ -1184,10 +1182,18 @@ struct TypePackStringifier
         state.unsee(&tp);
     }
 
-    void operator()(TypePackId, const Unifiable::Error& error)
+    void operator()(TypePackId, const ErrorTypePack& error)
     {
         state.result.error = true;
-        state.emit("*error-type*");
+
+        if (FFlag::LuauSyntheticErrors && error.synthetic)
+        {
+            state.emit("*");
+            stringify(*error.synthetic);
+            state.emit("*");
+        }
+        else
+            state.emit("*error-type*");
     }
 
     void operator()(TypePackId, const VariadicTypePack& pack)
@@ -1219,7 +1225,7 @@ struct TypePackStringifier
         if (FInt::DebugLuauVerboseTypeNames >= 2)
         {
             state.emit("-");
-            if (FFlag::DebugLuauDeferredConstraintResolution)
+            if (FFlag::LuauSolverV2)
                 state.emitLevel(pack.scope);
             else
                 state.emit(pack.level);
@@ -1238,7 +1244,7 @@ struct TypePackStringifier
         if (FInt::DebugLuauVerboseTypeNames >= 2)
         {
             state.emit("-");
-            if (FFlag::DebugLuauDeferredConstraintResolution)
+            if (FFlag::LuauSolverV2)
                 state.emitLevel(pack.scope);
             else
                 state.emit(pack.level);
@@ -1259,9 +1265,9 @@ struct TypePackStringifier
         state.emit("*");
     }
 
-    void operator()(TypePackId, const TypeFamilyInstanceTypePack& tfitp)
+    void operator()(TypePackId, const TypeFunctionInstanceTypePack& tfitp)
     {
-        state.emit(tfitp.family->name);
+        state.emit(tfitp.function->name);
         state.emit("<");
 
         bool comma = false;
@@ -1299,8 +1305,13 @@ void TypeStringifier::stringify(TypePackId tpid, const std::vector<std::optional
     tps.stringify(tpid);
 }
 
-static void assignCycleNames(const std::set<TypeId>& cycles, const std::set<TypePackId>& cycleTPs, DenseHashMap<TypeId, std::string>& cycleNames,
-    DenseHashMap<TypePackId, std::string>& cycleTpNames, bool exhaustive)
+static void assignCycleNames(
+    const std::set<TypeId>& cycles,
+    const std::set<TypePackId>& cycleTPs,
+    DenseHashMap<TypeId, std::string>& cycleNames,
+    DenseHashMap<TypePackId, std::string>& cycleTpNames,
+    bool exhaustive
+)
 {
     int nextIndex = 1;
 
@@ -1312,9 +1323,14 @@ static void assignCycleNames(const std::set<TypeId>& cycles, const std::set<Type
         if (auto ttv = get<TableType>(follow(cycleTy)); !exhaustive && ttv && (ttv->syntheticName || ttv->name))
         {
             // If we have a cycle type in type parameters, assign a cycle name for this named table
-            if (std::find_if(ttv->instantiatedTypeParams.begin(), ttv->instantiatedTypeParams.end(), [&](auto&& el) {
-                    return cycles.count(follow(el));
-                }) != ttv->instantiatedTypeParams.end())
+            if (std::find_if(
+                    ttv->instantiatedTypeParams.begin(),
+                    ttv->instantiatedTypeParams.end(),
+                    [&](auto&& el)
+                    {
+                        return cycles.count(follow(el));
+                    }
+                ) != ttv->instantiatedTypeParams.end())
                 cycleNames[cycleTy] = ttv->name ? *ttv->name : *ttv->syntheticName;
 
             continue;
@@ -1408,9 +1424,14 @@ ToStringResult toStringDetailed(TypeId ty, ToStringOptions& opts)
     state.exhaustive = true;
 
     std::vector<std::pair<TypeId, std::string>> sortedCycleNames{state.cycleNames.begin(), state.cycleNames.end()};
-    std::sort(sortedCycleNames.begin(), sortedCycleNames.end(), [](const auto& a, const auto& b) {
-        return a.second < b.second;
-    });
+    std::sort(
+        sortedCycleNames.begin(),
+        sortedCycleNames.end(),
+        [](const auto& a, const auto& b)
+        {
+            return a.second < b.second;
+        }
+    );
 
     bool semi = false;
     for (const auto& [cycleTy, name] : sortedCycleNames)
@@ -1421,18 +1442,25 @@ ToStringResult toStringDetailed(TypeId ty, ToStringOptions& opts)
         state.emit(name);
         state.emit(" = ");
         Luau::visit(
-            [&tvs, cycleTy = cycleTy](auto&& t) {
+            [&tvs, cycleTy = cycleTy](auto&& t)
+            {
                 return tvs(cycleTy, t);
             },
-            cycleTy->ty);
+            cycleTy->ty
+        );
 
         semi = true;
     }
 
     std::vector<std::pair<TypePackId, std::string>> sortedCycleTpNames(state.cycleTpNames.begin(), state.cycleTpNames.end());
-    std::sort(sortedCycleTpNames.begin(), sortedCycleTpNames.end(), [](const auto& a, const auto& b) {
-        return a.second < b.second;
-    });
+    std::sort(
+        sortedCycleTpNames.begin(),
+        sortedCycleTpNames.end(),
+        [](const auto& a, const auto& b)
+        {
+            return a.second < b.second;
+        }
+    );
 
     TypePackStringifier tps{state};
 
@@ -1444,10 +1472,12 @@ ToStringResult toStringDetailed(TypeId ty, ToStringOptions& opts)
         state.emit(name);
         state.emit(" = ");
         Luau::visit(
-            [&tps, cycleTy = cycleTp](auto&& t) {
+            [&tps, cycleTy = cycleTp](auto&& t)
+            {
                 return tps(cycleTy, t);
             },
-            cycleTp->ty);
+            cycleTp->ty
+        );
 
         semi = true;
     }
@@ -1492,7 +1522,7 @@ ToStringResult toStringDetailed(TypePackId tp, ToStringOptions& opts)
     else
         tvs.stringify(tp);
 
-    if (!cycles.empty())
+    if (!cycles.empty() || !cycleTPs.empty())
     {
         result.cycle = true;
         state.emit(" where ");
@@ -1501,9 +1531,14 @@ ToStringResult toStringDetailed(TypePackId tp, ToStringOptions& opts)
     state.exhaustive = true;
 
     std::vector<std::pair<TypeId, std::string>> sortedCycleNames{state.cycleNames.begin(), state.cycleNames.end()};
-    std::sort(sortedCycleNames.begin(), sortedCycleNames.end(), [](const auto& a, const auto& b) {
-        return a.second < b.second;
-    });
+    std::sort(
+        sortedCycleNames.begin(),
+        sortedCycleNames.end(),
+        [](const auto& a, const auto& b)
+        {
+            return a.second < b.second;
+        }
+    );
 
     bool semi = false;
     for (const auto& [cycleTy, name] : sortedCycleNames)
@@ -1514,10 +1549,42 @@ ToStringResult toStringDetailed(TypePackId tp, ToStringOptions& opts)
         state.emit(name);
         state.emit(" = ");
         Luau::visit(
-            [&tvs, cycleTy = cycleTy](auto t) {
+            [&tvs, cycleTy = cycleTy](auto t)
+            {
                 return tvs(cycleTy, t);
             },
-            cycleTy->ty);
+            cycleTy->ty
+        );
+
+        semi = true;
+    }
+
+    std::vector<std::pair<TypePackId, std::string>> sortedCycleTpNames{state.cycleTpNames.begin(), state.cycleTpNames.end()};
+    std::sort(
+        sortedCycleTpNames.begin(),
+        sortedCycleTpNames.end(),
+        [](const auto& a, const auto& b)
+        {
+            return a.second < b.second;
+        }
+    );
+
+    TypePackStringifier tps{tvs.state};
+
+    for (const auto& [cycleTp, name] : sortedCycleTpNames)
+    {
+        if (semi)
+            state.emit(" ; ");
+
+        state.emit(name);
+        state.emit(" = ");
+        Luau::visit(
+            [&tps, cycleTp = cycleTp](auto t)
+            {
+                return tps(cycleTp, t);
+            },
+            cycleTp->ty
+        );
 
         semi = true;
     }
@@ -1703,12 +1770,26 @@ std::string generateName(size_t i)
     return n;
 }
 
+std::string toStringVector(const std::vector<TypeId>& types, ToStringOptions& opts)
+{
+    std::string s;
+    for (TypeId ty : types)
+    {
+        if (!s.empty())
+            s += ", ";
+        s += toString(ty, opts);
+    }
+    return s;
+}
+
 std::string toString(const Constraint& constraint, ToStringOptions& opts)
 {
-    auto go = [&opts](auto&& c) -> std::string {
+    auto go = [&opts](auto&& c) -> std::string
+    {
         using T = std::decay_t<decltype(c)>;
 
-        auto tos = [&opts](auto&& a) {
+        auto tos = [&opts](auto&& a)
+        {
             return toString(a, opts);
         };
 
@@ -1722,7 +1803,7 @@ std::string toString(const Constraint& constraint, ToStringOptions& opts)
         {
             std::string subStr = tos(c.subPack);
             std::string superStr = tos(c.superPack);
-            return subStr + " <: " + superStr;
+            return subStr + " <...: " + superStr;
         }
         else if constexpr (std::is_same_v<T, GeneralizationConstraint>)
         {
@@ -1730,16 +1811,10 @@ std::string toString(const Constraint& constraint, ToStringOptions& opts)
             std::string superStr = tos(c.sourceType);
             return subStr + " ~ gen " + superStr;
         }
-        else if constexpr (std::is_same_v<T, InstantiationConstraint>)
-        {
-            std::string subStr = tos(c.subType);
-            std::string superStr = tos(c.superType);
-            return subStr + " ~ inst " + superStr;
-        }
         else if constexpr (std::is_same_v<T, IterableConstraint>)
         {
             std::string iteratorStr = tos(c.iterator);
-            std::string variableStr = tos(c.variables);
+            std::string variableStr = toStringVector(c.variables, opts);
 
             return variableStr + " ~ iterate " + iteratorStr;
         }
@@ -1772,44 +1847,16 @@ std::string toString(const Constraint& constraint, ToStringOptions& opts)
         {
             return tos(c.resultType) + " ~ hasProp " + tos(c.subjectType) + ", \"" + c.prop + "\" ctx=" + std::to_string(int(c.context));
         }
-        else if constexpr (std::is_same_v<T, SetPropConstraint>)
+        else if constexpr (std::is_same_v<T, HasIndexerConstraint>)
         {
-            const std::string pathStr = c.path.size() == 1 ? "\"" + c.path[0] + "\"" : "[\"" + join(c.path, "\", \"") + "\"]";
-            return tos(c.resultType) + " ~ setProp " + tos(c.subjectType) + ", " + pathStr + " " + tos(c.propType);
+            return tos(c.resultType) + " ~ hasIndexer " + tos(c.subjectType) + " " + tos(c.indexType);
         }
-        else if constexpr (std::is_same_v<T, SetIndexerConstraint>)
-        {
-            return tos(c.resultType) + " ~ setIndexer " + tos(c.subjectType) + " [ " + tos(c.indexType) + " ] " + tos(c.propType);
-        }
-        else if constexpr (std::is_same_v<T, SingletonOrTopTypeConstraint>)
-        {
-            std::string result = tos(c.resultType);
-            std::string discriminant = tos(c.discriminantType);
-
-            if (c.negated)
-                return result + " ~ if isSingleton D then ~D else unknown where D = " + discriminant;
-            else
-                return result + " ~ if isSingleton D then D else unknown where D = " + discriminant;
-        }
+        else if constexpr (std::is_same_v<T, AssignPropConstraint>)
+            return "assignProp " + tos(c.lhsType) + " " + c.propName + " " + tos(c.rhsType);
+        else if constexpr (std::is_same_v<T, AssignIndexConstraint>)
+            return "assignIndex " + tos(c.lhsType) + " " + tos(c.indexType) + " " + tos(c.rhsType);
         else if constexpr (std::is_same_v<T, UnpackConstraint>)
-            return tos(c.resultPack) + " ~ unpack " + tos(c.sourcePack);
-        else if constexpr (std::is_same_v<T, SetOpConstraint>)
-        {
-            const char* op = c.mode == SetOpConstraint::Union ? " | " : " & ";
-            std::string res = tos(c.resultType) + " ~ ";
-            bool first = true;
-            for (TypeId t : c.types)
-            {
-                if (first)
-                    first = false;
-                else
-                    res += op;
-
-                res += tos(t);
-            }
-
-            return res;
-        }
+            return toStringVector(c.resultPack, opts) + " ~ ...unpack " + tos(c.sourcePack);
         else if constexpr (std::is_same_v<T, ReduceConstraint>)
             return "reduce " + tos(c.ty);
         else if constexpr (std::is_same_v<T, ReducePackConstraint>)
@@ -1879,15 +1926,8 @@ std::string toString(const Position& position)
 
 std::string toString(const Location& location, int offset, bool useBegin)
 {
-    if (FFlag::LuauToStringPrettifyLocation)
-    {
-        return "(" + std::to_string(location.begin.line + offset) + ", " + std::to_string(location.begin.column + offset) + ") - (" +
-               std::to_string(location.end.line + offset) + ", " + std::to_string(location.end.column + offset) + ")";
-    }
-    else
-    {
-        return "Location { " + toString(location.begin) + ", " + toString(location.end) + " }";
-    }
+    return "(" + std::to_string(location.begin.line + offset) + ", " + std::to_string(location.begin.column + offset) + ") - (" +
+           std::to_string(location.end.line + offset) + ", " + std::to_string(location.end.column + offset) + ")";
 }
 
 std::string toString(const TypeOrPack& tyOrTp, ToStringOptions& opts)
